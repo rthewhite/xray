@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xray"
+version = "0.1.0"
+description = "Fast QEMU VM manager with qcow2 overlays and snapshots"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1",
+    "tomli-w>=1.0",
+    "rich>=13.0",
+]
+
+[project.scripts]
+xray = "xray.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
