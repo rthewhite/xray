@@ -95,15 +95,12 @@ def vm_create(name: str, base_name: str | None, memory: int, cpus: int, ssh_port
         if not bases:
             console.print("[red]No base images available.[/] Import one first: xray base import <path>")
             sys.exit(1)
-        if len(bases) == 1:
-            base_name = bases[0]
-            console.print(f"Using base image: [bold]{base_name}[/]")
-        else:
-            console.print("[bold]Available base images:[/]")
-            for i, b in enumerate(bases, 1):
-                console.print(f"  {i}. {b}")
-            choice = click.prompt("Select base image", type=click.IntRange(1, len(bases)))
-            base_name = bases[choice - 1]
+        # Always show picker
+        console.print("[bold]Available base images:[/]")
+        for i, b in enumerate(bases, 1):
+            console.print(f"  {i}. {b}")
+        choice = click.prompt("Select base image", type=click.IntRange(1, len(bases)))
+        base_name = bases[choice - 1]
 
     # Build ports list
     port_list = list(ports)

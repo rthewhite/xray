@@ -1,0 +1,22 @@
+[Unit]
+Description=xray VM environment setup
+Documentation=https://github.com/rdewit/xray
+After=network.target
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/xray-setup.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=no
+ReadWritePaths=/home
+
+[Install]
+WantedBy=multi-user.target

@@ -115,7 +115,23 @@ xray base import ~/ubuntu-base.qcow2 --name ubuntu
 - Install any common packages you'll need across VMs
 - Update the system before shutting down
 - Consider creating a user account with a known password
+- **Install xray guest scripts** (see below) - enables auto-mounting of Claude credentials
 - The base image becomes read-only once imported, so configure everything you need first
+
+**Install xray guest scripts in base image:**
+
+Inside your VM before creating the base image:
+
+```bash
+# Copy guest-scripts to the VM (or clone the xray repo)
+git clone https://github.com/YOUR_USERNAME/xray.git
+cd xray/guest-scripts
+
+# Install the auto-mount service
+sudo ./install.sh
+```
+
+This installs a systemd service that automatically mounts Claude credentials at `~/.claude` on boot.
 
 **Pre-built images:**
 - Ubuntu Cloud Images: https://cloud-images.ubuntu.com/ (look for ARM64 UEFI images)
@@ -228,9 +244,80 @@ Storage layout:
         └── pid           # Process ID file (while running)
 ```
 
+## Claude Code Integration
+
+xray automatically shares a Claude credentials directory (`~/.xray/.claude`) with all VMs via virtio-9p. This allows VMs to share Claude authentication.
+
+### Automatic setup (recommended)
+
+Install the xray guest scripts in your base image before creating it:
+
+```bash
+# Inside your VM
+git clone https://github.com/YOUR_USERNAME/xray.git
+cd xray/guest-scripts
+sudo ./install.sh
+```
+
+This installs a systemd service that automatically:
+- Mounts Claude credentials at `~/.claude` on boot
+- Detects the primary user automatically
+- Loads required kernel modules
+- Can be extended for other secrets (GitHub tokens, etc.)
+
+### Manual setup (existing VMs)
+
+If you didn't install the guest scripts:
+
+```bash
+# One-time mount
+sudo mkdir -p ~/.claude
+sudo mount -t 9p -o trans=virtio,version=9p2000.L claude_creds ~/.claude
+
+# Or install the scripts now
+git clone https://github.com/YOUR_USERNAME/xray.git
+cd xray/guest-scripts
+sudo ./install.sh
+```
+
+### Verify it's working
+
+After boot (or after running the service):
+
+```bash
+# Check if mounted
+ls -la ~/.claude
+
+# Check service status
+sudo systemctl status xray-setup.service
+
+# View logs
+sudo journalctl -u xray-setup.service
+```
+
+### How it works
+
+- **Shared directory:** `~/.xray/.claude` on host is mounted into all VMs
+- **Auto-mount:** Systemd service handles mounting at boot
+- **Read-write:** VMs can authenticate and store credentials
+- **Persistent:** Credentials persist across VM restarts
+- **Shared:** All VMs share the same credentials
+
+**Security:** All VMs share credentials. Only run trusted code.
+
+### Extending for other secrets
+
+The `xray-setup.sh` script can be extended to mount other shared directories:
+
+```bash
+# Example: Add GitHub token mounting
+# Edit /usr/local/bin/xray-setup.sh and implement mount_github()
+```
+
 ## Architecture notes
 
 - Uses `qemu-system-aarch64` with Apple HVF acceleration for near-native performance on Apple Silicon
 - UEFI boot via EDK2 firmware (auto-detected from Homebrew's qemu package)
 - Each VM gets a QMP (QEMU Monitor Protocol) unix socket for management — this enables live snapshots and graceful ACPI shutdown
 - Overlay images use relative paths to their backing file, so the entire `~/.xray` directory is portable
+- Claude credentials automatically shared via virtio-9p (mount with fstab in guest)

@@ -7,6 +7,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from . import config
+
 
 def find_binary(name: str) -> str:
     """Find a QEMU binary on PATH, raising if not found."""
@@ -161,6 +163,13 @@ def build_start_command(
         host_port, guest_port = port.split(":")
         netdev += f",hostfwd=tcp::{host_port}-:{guest_port}"
     cmd += ["-netdev", netdev]
+
+    # Claude credentials directory via virtio-9p (always enabled)
+    claude_dir = config.claude_creds_dir()
+    cmd += [
+        "-virtfs",
+        f"local,path={claude_dir},mount_tag=claude_creds,security_model=mapped-xattr"
+    ]
 
     # QMP socket for management
     cmd += ["-qmp", f"unix:{qmp_sock_path},server,nowait"]

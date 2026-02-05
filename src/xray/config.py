@@ -28,6 +28,13 @@ def vms_dir() -> Path:
     return d
 
 
+def claude_creds_dir() -> Path:
+    """Get the path to xray's managed Claude credentials directory."""
+    creds_dir = xray_home() / ".claude"
+    creds_dir.mkdir(parents=True, exist_ok=True)
+    return creds_dir
+
+
 def vm_dir(name: str) -> Path:
     return vms_dir() / name
 
