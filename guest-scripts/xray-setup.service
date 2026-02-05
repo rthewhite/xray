@@ -1,8 +1,9 @@
 [Unit]
 Description=xray VM environment setup
 Documentation=https://github.com/rdewit/xray
-After=network.target
+After=local-fs.target systemd-modules-load.service
 Before=multi-user.target
+Wants=local-fs.target
 
 [Service]
 Type=oneshot

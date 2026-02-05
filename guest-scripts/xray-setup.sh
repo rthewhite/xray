@@ -45,13 +45,41 @@ mount_claude() {
             return 0
         fi
 
-        # Try to mount
-        if mount -t 9p -o trans=virtio,version=9p2000.L "$mount_tag" "$mount_point"; then
+        # Wait for virtio device to become available
+        local max_wait=30
+        local waited=0
+        local device_ready=false
+
+        log "Waiting for virtio device '$mount_tag' to become available..."
+        while [ $waited -lt $max_wait ]; do
+            # Check if the mount_tag appears in any virtio device
+            if [ -d /sys/bus/virtio/drivers/9pnet_virtio ] && \
+               find /sys/bus/virtio/drivers/9pnet_virtio/virtio* -name mount_tag -exec grep -q "^${mount_tag}$" {} \; 2>/dev/null; then
+                log "Virtio device '$mount_tag' is ready"
+                device_ready=true
+                break
+            fi
+
+            if [ $waited -eq 0 ]; then
+                log "Device not ready yet, waiting..."
+            fi
+
+            sleep 1
+            waited=$((waited + 1))
+        done
+
+        if [ "$device_ready" = false ]; then
+            log "WARNING: Virtio device '$mount_tag' did not become available within ${max_wait}s"
+            return 1
+        fi
+
+        # Device is ready, attempt mount
+        if mount -t 9p -o trans=virtio,version=9p2000.L,cache=loose "$mount_tag" "$mount_point" 2>/dev/null; then
             log "Successfully mounted Claude credentials at $mount_point"
             chown "$PRIMARY_USER:$PRIMARY_USER" "$mount_point"
             return 0
         else
-            log "WARNING: Failed to mount Claude credentials (virtfs may not be available)"
+            log "ERROR: Mount command failed even though device is ready"
             return 1
         fi
     else
