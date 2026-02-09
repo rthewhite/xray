@@ -1,0 +1,91 @@
+"""Firewall setup and guest configuration for xray VMs."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from . import config
+
+# The proxy is exposed to guests via QEMU guestfwd
+# Can't use 10.0.2.2 (gateway) - QEMU reserves it, use 10.0.2.100 instead
+GUEST_PROXY_IP = "10.0.2.100"
+# We use a fixed port so the guest knows where to connect
+GUEST_PROXY_PORT = 1080
+
+# Default config file name
+DEFAULT_RULES_FILE = "default-firewall-rules.conf"
+
+# Built-in defaults (used if config file doesn't exist)
+BUILTIN_DEFAULT_DOMAINS = """# Default allowed domains for xray firewall
+# Lines starting with # are comments
+# Each line should be a domain suffix to allow (e.g., "github.com" allows *.github.com)
+
+# Ubuntu package repositories
+archive.ubuntu.com
+ports.ubuntu.com
+security.ubuntu.com
+ppa.launchpad.net
+ppa.launchpadcontent.net
+
+# Canonical services (NTP, mirrors, etc.)
+canonical.com
+ubuntu.com
+launchpad.net
+
+# Common package sources
+debian.org
+deb.nodesource.com
+dl.google.com
+packages.microsoft.com
+download.docker.com
+
+# Development services
+github.com
+githubusercontent.com
+pypi.org
+files.pythonhosted.org
+npmjs.org
+registry.npmjs.org
+"""
+
+
+def _get_default_rules_path() -> Path:
+    """Get path to the default firewall rules config file."""
+    return config.xray_home() / DEFAULT_RULES_FILE
+
+
+def _ensure_default_rules_file() -> Path:
+    """Ensure the default rules file exists, creating it with defaults if not."""
+    path = _get_default_rules_path()
+    if not path.exists():
+        path.write_text(BUILTIN_DEFAULT_DOMAINS)
+    return path
+
+
+def _read_default_domains() -> list[str]:
+    """Read default allowed domains from config file."""
+    path = _ensure_default_rules_file()
+    domains: list[str] = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        # Skip empty lines and comments
+        if line and not line.startswith("#"):
+            domains.append(line.lower())
+    return domains
+
+
+def get_default_allowed_domains() -> dict[str, str]:
+    """Get default allowed domains from config file.
+
+    Returns a dict of domain patterns to allow.
+    """
+    domains = _read_default_domains()
+    return {domain: "allow" for domain in domains}
+
+
+def get_ssh_port(name: str) -> int | None:
+    """Get the SSH port for a VM."""
+    vm_cfg = config.read_vm_config(name)
+    return vm_cfg.get("ssh_port")
+
+

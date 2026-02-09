@@ -132,6 +132,8 @@ def build_start_command(
     cpus: int = 2,
     display: str = "cocoa",
     ports: list[str] | None = None,
+    ssh_port: int | None = None,
+    proxy_port: int | None = None,
 ) -> list[str]:
     """Build the qemu-system-aarch64 command line."""
     firmware = find_firmware()
@@ -159,9 +161,21 @@ def build_start_command(
 
     # Network with port forwards
     netdev = "user,id=net0"
+
+    # SSH port forward (auto-assigned)
+    if ssh_port:
+        netdev += f",hostfwd=tcp::{ssh_port}-:22"
+
+    # Additional user-specified port forwards
     for port in (ports or []):
         host_port, guest_port = port.split(":")
         netdev += f",hostfwd=tcp::{host_port}-:{guest_port}"
+
+    # Proxy forward for firewall (guest connects to 10.0.2.100:1080)
+    # Can't use 10.0.2.2 (gateway) - QEMU reserves it
+    if proxy_port:
+        netdev += f",guestfwd=tcp:10.0.2.100:1080-cmd:nc 127.0.0.1 {proxy_port}"
+
     cmd += ["-netdev", netdev]
 
     # Claude credentials directory via virtio-9p (always enabled)

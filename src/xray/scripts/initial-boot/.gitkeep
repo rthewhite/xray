@@ -1,0 +1,3 @@
+# This directory contains xray built-in initial-boot scripts.
+# Scripts are executed once on first VM boot.
+# Add .sh files here to include them in all VMs.

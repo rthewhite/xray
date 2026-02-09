@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
@@ -10,7 +9,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from . import config, base as base_mod, vm as vm_mod, snapshot as snap_mod, qemu
+from . import config, base as base_mod, vm as vm_mod, snapshot as snap_mod, qemu, hooks as hooks_mod
 
 console = Console()
 
@@ -85,10 +84,13 @@ def base_remove(name: str):
 @click.option("--base", "-b", "base_name", default=None, help="Base image to use")
 @click.option("--memory", "-m", default=4096, help="Memory in MB (default: 4096)")
 @click.option("--cpus", "-c", default=4, help="Number of CPUs (default: 4)")
-@click.option("--ssh-port", default=None, type=int, help="Host port to forward to guest port 22")
+@click.option("--ssh-user", default="ubuntu", help="SSH username in guest (default: ubuntu)")
 @click.option("--port", "-p", "ports", multiple=True, help="Port forward as host:guest (e.g. -p 8080:80)")
-def vm_create(name: str, base_name: str | None, memory: int, cpus: int, ssh_port: int | None, ports: tuple[str, ...]):
-    """Create a new VM from a base image."""
+def vm_create(name: str, base_name: str | None, memory: int, cpus: int, ssh_user: str, ports: tuple[str, ...]):
+    """Create a new VM from a base image.
+
+    SSH port is automatically assigned (starting from 2222).
+    """
     # Interactive base picker if none specified
     if base_name is None:
         bases = config.list_bases()
@@ -102,14 +104,10 @@ def vm_create(name: str, base_name: str | None, memory: int, cpus: int, ssh_port
         choice = click.prompt("Select base image", type=click.IntRange(1, len(bases)))
         base_name = bases[choice - 1]
 
-    # Build ports list
-    port_list = list(ports)
-    if ssh_port:
-        port_list.append(f"{ssh_port}:22")
-
     try:
-        vm_mod.create(name, base_name, memory=memory, cpus=cpus, ports=port_list)
+        ssh_port = vm_mod.create(name, base_name, memory=memory, cpus=cpus, ports=list(ports), ssh_user=ssh_user)
         console.print(f"[green]Created VM:[/] {name} (base: {base_name})")
+        console.print(f"[dim]SSH port:[/] {ssh_port} (ssh -p {ssh_port} {ssh_user}@localhost)")
     except (FileNotFoundError, FileExistsError, ValueError) as e:
         console.print(f"[red]Error:[/] {e}")
         sys.exit(1)
@@ -126,6 +124,7 @@ def vm_list():
     table = Table(title="Virtual Machines")
     table.add_column("Name")
     table.add_column("Base")
+    table.add_column("SSH Port", justify="right")
     table.add_column("Memory", justify="right")
     table.add_column("CPUs", justify="right")
     table.add_column("Disk", justify="right")
@@ -148,34 +147,36 @@ def vm_list():
             except Exception:
                 pass
 
+            ssh_port = vm_cfg.get("ssh_port", "?")
+
             table.add_row(
                 name,
                 vm_cfg.get("base", "?"),
+                str(ssh_port),
                 f"{vm_cfg.get('memory', '?')} MB",
                 str(vm_cfg.get("cpus", "?")),
                 disk_size_str,
                 status,
             )
         except Exception:
-            table.add_row(name, "?", "?", "?", "?", "[red]error[/]")
+            table.add_row(name, "?", "?", "?", "?", "?", "[red]error[/]")
 
     console.print(table)
 
 
 @main.command("start")
 @click.argument("name")
-@click.option("--foreground", "-f", is_flag=True, help="Run in foreground (blocking)")
 @click.option("--display", type=click.Choice(["cocoa", "none", "curses"]), default="cocoa", help="Display type (default: cocoa)")
-def vm_start(name: str, foreground: bool, display: str):
-    """Start a VM."""
+@click.option("--no-hooks", is_flag=True, help="Skip running lifecycle hooks")
+def vm_start(name: str, display: str, no_hooks: bool):
+    """Start a VM.
+
+    The VM runs in the foreground. Press Ctrl+C or close the window to stop.
+    """
     try:
-        if not foreground:
-            proc = vm_mod.start(name, detach=True, display=display)
-            console.print(f"[green]Started VM:[/] {name} (PID: {proc.pid})")
-        else:
-            console.print(f"Starting VM [bold]{name}[/] in foreground (Ctrl+C to stop)...")
-            vm_mod.start(name, detach=False, display=display)
-            console.print(f"[dim]VM {name} stopped.[/]")
+        console.print(f"Starting VM [bold]{name}[/] (Ctrl+C to stop)...")
+        vm_mod.start(name, display=display, run_hooks=not no_hooks)
+        console.print(f"[dim]VM {name} stopped.[/]")
     except (FileNotFoundError, RuntimeError) as e:
         console.print(f"[red]Error:[/] {e}")
         sys.exit(1)
@@ -315,6 +316,250 @@ def port_remove(vm: str, mapping: str):
     except (FileNotFoundError, ValueError) as e:
         console.print(f"[red]Error:[/] {e}")
         sys.exit(1)
+
+
+# ── Firewall commands ────────────────────────────────────────────────
+
+@main.group("firewall")
+def firewall_group():
+    """Manage VM firewall rules."""
+
+
+@firewall_group.command("list")
+@click.argument("vm")
+def firewall_list(vm: str):
+    """List firewall rules for a VM."""
+    if not config.vm_dir(vm).exists():
+        console.print(f"[red]VM '{vm}' not found[/]")
+        sys.exit(1)
+
+    rules = config.read_firewall_rules(vm)
+
+    if not rules:
+        console.print(f"No firewall rules for VM '{vm}'")
+        return
+
+    table = Table(title=f"Firewall Rules for '{vm}'")
+    table.add_column("Destination", style="cyan")
+    table.add_column("Action", style="green")
+
+    for dest, action in sorted(rules.items()):
+        action_color = "green" if action == "allow" else "red"
+        table.add_row(dest, f"[{action_color}]{action}[/]")
+
+    console.print(table)
+
+
+@firewall_group.command("add")
+@click.argument("vm")
+@click.argument("destination")  # Format: IP:PORT
+@click.argument("action", type=click.Choice(["allow", "deny"]))
+def firewall_add(vm: str, destination: str, action: str):
+    """Add a firewall rule (e.g. xray firewall add my-vm 1.1.1.1:443 allow)."""
+    if not config.vm_dir(vm).exists():
+        console.print(f"[red]VM '{vm}' not found[/]")
+        sys.exit(1)
+
+    # Parse destination
+    try:
+        ip, port_str = destination.rsplit(":", 1)
+        port = int(port_str)
+        if not (1 <= port <= 65535):
+            raise ValueError
+    except ValueError:
+        console.print(f"[red]Invalid destination '{destination}'. Use format: IP:PORT[/]")
+        sys.exit(1)
+
+    config.add_firewall_rule(vm, ip, port, action)
+    action_color = "green" if action == "allow" else "red"
+    console.print(f"[{action_color}]Rule added: {destination} -> {action}[/]")
+
+
+@firewall_group.command("remove")
+@click.argument("vm")
+@click.argument("destination")  # Format: IP:PORT
+def firewall_remove(vm: str, destination: str):
+    """Remove a firewall rule (e.g. xray firewall remove my-vm 1.1.1.1:443)."""
+    if not config.vm_dir(vm).exists():
+        console.print(f"[red]VM '{vm}' not found[/]")
+        sys.exit(1)
+
+    vm_cfg = config.read_vm_config(vm)
+    firewall = vm_cfg.get("firewall", {})
+
+    if destination not in firewall:
+        console.print(f"[yellow]Rule '{destination}' not found[/]")
+        sys.exit(1)
+
+    del firewall[destination]
+    vm_cfg["firewall"] = firewall
+    config.write_vm_config(vm, vm_cfg)
+    console.print(f"[green]Rule removed: {destination}[/]")
+
+
+@firewall_group.command("clear")
+@click.argument("vm")
+@click.confirmation_option(prompt="Clear all firewall rules?")
+def firewall_clear(vm: str):
+    """Clear all firewall rules for a VM."""
+    if not config.vm_dir(vm).exists():
+        console.print(f"[red]VM '{vm}' not found[/]")
+        sys.exit(1)
+
+    vm_cfg = config.read_vm_config(vm)
+    vm_cfg["firewall"] = {}
+    config.write_vm_config(vm, vm_cfg)
+    console.print(f"[green]All firewall rules cleared for '{vm}'[/]")
+
+
+@firewall_group.command("status")
+@click.argument("vm")
+def firewall_status(vm: str):
+    """Show firewall status for a VM."""
+    if not config.vm_dir(vm).exists():
+        console.print(f"[red]VM '{vm}' not found[/]")
+        sys.exit(1)
+
+    vm_cfg = config.read_vm_config(vm)
+    rules = vm_cfg.get("firewall", {})
+
+    console.print(f"[bold]Firewall Status for '{vm}'[/]")
+    console.print()
+    console.print(f"Rules: {len(rules)}")
+
+    if rules:
+        allow_count = sum(1 for v in rules.values() if v == "allow")
+        deny_count = sum(1 for v in rules.values() if v == "deny")
+        console.print(f"  [green]Allow: {allow_count}[/]")
+        console.print(f"  [red]Deny: {deny_count}[/]")
+
+
+# ── Hooks commands ──────────────────────────────────────────────────
+
+
+@main.group("hooks")
+def hooks_group():
+    """Manage VM lifecycle hooks.
+
+    Scripts are merged from three sources (in order):
+    1. xray built-in scripts
+    2. User global scripts (~/.xray/scripts/{hook_type}/)
+    3. Per-VM scripts (~/.xray/vms/{vm}/scripts/{hook_type}/)
+
+    Hook types: initial-boot, boot
+    """
+
+
+@hooks_group.command("list")
+@click.argument("vm")
+def hooks_list(vm: str):
+    """List all hooks that will run for a VM."""
+    if not config.vm_dir(vm).exists():
+        console.print(f"[red]VM '{vm}' not found[/]")
+        sys.exit(1)
+
+    all_hooks = hooks_mod.list_all_hooks(vm)
+    first_boot_done = hooks_mod.is_first_boot_completed(vm)
+
+    for hook_type in hooks_mod.HOOK_TYPES:
+        scripts = all_hooks.get(hook_type, [])
+
+        # Add status indicator for initial-boot
+        status = ""
+        if hook_type == "initial-boot" and first_boot_done:
+            status = " [dim](already run)[/]"
+
+        console.print(f"\n[bold cyan]{hook_type}[/]{status}")
+
+        if not scripts:
+            console.print("  [dim]No scripts[/]")
+        else:
+            for source, script_name in scripts:
+                source_color = {"xray": "blue", "user": "green", "vm": "yellow"}.get(source, "white")
+                console.print(f"  [{source_color}][{source}][/] {script_name}")
+
+    # Show paths
+    console.print(f"\n[dim]Script locations:[/]")
+    console.print(f"  [dim]User global:[/] {hooks_mod.user_scripts_dir()}")
+    console.print(f"  [dim]Per-VM:[/] {hooks_mod.vm_scripts_dir(vm)}")
+
+
+@hooks_group.command("run")
+@click.argument("vm")
+@click.argument("hook_type", type=click.Choice(["initial-boot", "boot"]))
+@click.option("--user", "-u", default=None, help="SSH username (default: from VM config)")
+def hooks_run(vm: str, hook_type: str, user: str | None):
+    """Manually run hooks for a VM (VM must be running)."""
+    if not config.vm_dir(vm).exists():
+        console.print(f"[red]VM '{vm}' not found[/]")
+        sys.exit(1)
+
+    if not vm_mod.is_running(vm):
+        console.print(f"[red]VM '{vm}' is not running[/]")
+        sys.exit(1)
+
+    scripts = hooks_mod.get_hook_scripts(vm, hook_type)
+    if not scripts:
+        console.print(f"[yellow]No {hook_type} scripts configured[/]")
+        return
+
+    # Get SSH user from config if not provided
+    if user is None:
+        vm_cfg = config.read_vm_config(vm)
+        user = vm_cfg.get("ssh_user", "ubuntu")
+
+    console.print(f"Running {len(scripts)} {hook_type} script(s)...")
+    results = hooks_mod.run_hook_scripts(vm, hook_type, ssh_user=user)
+
+    # Show results
+    success_count = sum(1 for _, _, success, _ in results if success)
+    fail_count = len(results) - success_count
+
+    if fail_count > 0:
+        console.print(f"\n[red]Completed with {fail_count} failure(s)[/]")
+        for source, name, success, output in results:
+            if not success:
+                console.print(f"  [red]FAILED:[/] [{source}] {name}")
+                console.print(f"    {output}")
+        sys.exit(1)
+    else:
+        console.print(f"[green]All {success_count} script(s) completed successfully[/]")
+
+
+@hooks_group.command("reset-initial-boot")
+@click.argument("vm")
+def hooks_reset_initial_boot(vm: str):
+    """Reset initial-boot flag so initial-boot scripts run again."""
+    if not config.vm_dir(vm).exists():
+        console.print(f"[red]VM '{vm}' not found[/]")
+        sys.exit(1)
+
+    vm_cfg = config.read_vm_config(vm)
+    vm_cfg["first_boot_completed"] = False
+    config.write_vm_config(vm, vm_cfg)
+    console.print(f"[green]Reset initial-boot flag for '{vm}'[/]")
+    console.print("[dim]initial-boot scripts will run on next start[/]")
+
+
+@hooks_group.command("init")
+@click.argument("vm", required=False)
+def hooks_init(vm: str | None):
+    """Create scripts directories for user/VM hooks.
+
+    Without VM argument: creates ~/.xray/scripts/{hook_type}/
+    With VM argument: also creates ~/.xray/vms/{vm}/scripts/{hook_type}/
+    """
+    hooks_mod.ensure_scripts_dirs(vm)
+
+    console.print("[green]Created scripts directories:[/]")
+    console.print(f"  {hooks_mod.user_scripts_dir()}/")
+    for hook_type in hooks_mod.HOOK_TYPES:
+        console.print(f"    {hook_type}/")
+
+    if vm:
+        console.print(f"  {hooks_mod.vm_scripts_dir(vm)}/")
+        for hook_type in hooks_mod.HOOK_TYPES:
+            console.print(f"    {hook_type}/")
 
 
 # ── Snapshot commands ────────────────────────────────────────────────
