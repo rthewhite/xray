@@ -125,10 +125,18 @@ def list_all_hooks(name: str) -> dict[str, list[tuple[str, str]]]:
     Returns:
         Dict mapping hook_type -> list of (source, script_name) tuples
     """
+    from . import plugins
+
     result = {}
     for hook_type in HOOK_TYPES:
+        entries: list[tuple[str, str]] = []
+        # Shell script hooks
         scripts = get_hook_scripts(name, hook_type)
-        result[hook_type] = [(source, script.name) for source, script in scripts]
+        entries.extend((source, script.name) for source, script in scripts)
+        # Plugin hooks
+        for plugin_name, fn in plugins.get_plugin_hooks(hook_type):
+            entries.append((f"plugin:{plugin_name}", fn.__name__))
+        result[hook_type] = entries
     return result
 
 
@@ -237,15 +245,24 @@ def run_hook_scripts(
 def run_boot_hooks(name: str, ssh_user: str = "ubuntu") -> None:
     """Run boot hooks for a VM (called after VM starts).
 
-    Runs initial-boot (if not done) then boot.
+    Runs initial-boot (if not done) then boot. Includes plugin hooks.
     """
+    from . import plugins, firewall
+
+    ssh_port = firewall.get_ssh_port(name)
+
     # Check if initial boot hooks need to run
     if not is_first_boot_completed(name):
         scripts = get_hook_scripts(name, "initial-boot")
-        if scripts:
+        plugin_hooks = plugins.get_plugin_hooks("initial-boot")
+        if scripts or plugin_hooks:
             print(f"[hooks] Running initial-boot hooks for '{name}'...", flush=True)
             results = run_hook_scripts(name, "initial-boot", ssh_user=ssh_user)
-            # Only mark as completed if all scripts succeeded
+            if plugin_hooks and ssh_port:
+                results.extend(plugins.run_plugin_hooks(
+                    "initial-boot", name, ssh_port, ssh_user=ssh_user,
+                ))
+            # Only mark as completed if all hooks succeeded
             all_success = all(success for _, _, success, _ in results)
             if all_success:
                 mark_first_boot_completed(name)
@@ -254,14 +271,19 @@ def run_boot_hooks(name: str, ssh_user: str = "ubuntu") -> None:
                 failed = [(s, n) for s, n, success, _ in results if not success]
                 print(f"[hooks] initial-boot FAILED for '{name}': {failed}", flush=True)
         else:
-            # No initial-boot scripts, mark as completed
+            # No initial-boot hooks, mark as completed
             mark_first_boot_completed(name)
 
     # Run boot hooks
     scripts = get_hook_scripts(name, "boot")
-    if scripts:
+    plugin_hooks = plugins.get_plugin_hooks("boot")
+    if scripts or plugin_hooks:
         print(f"[hooks] Running boot hooks for '{name}'...", flush=True)
         results = run_hook_scripts(name, "boot", ssh_user=ssh_user)
+        if plugin_hooks and ssh_port:
+            results.extend(plugins.run_plugin_hooks(
+                "boot", name, ssh_port, ssh_user=ssh_user,
+            ))
         failed = [(s, n) for s, n, success, _ in results if not success]
         if failed:
             print(f"[hooks] boot had failures for '{name}': {failed}", flush=True)

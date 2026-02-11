@@ -33,6 +33,7 @@ After install, the `xray` CLI is available. Key commands: `xray base import`, `x
 - **firewall.py** — Rule storage/matching. Rules persist in each VM's `vm.toml`
 - **notifier.py** — macOS AppleScript dialogs for allow/deny decisions on unknown connections
 - **hooks.py** — Lifecycle hooks (initial-boot, boot). Scripts collected from 3 sources in order: built-in (`src/xray/scripts/`), user global (`~/.xray/scripts/`), per-VM. Scripts run on the host with `XRAY_*` env vars and SSH into the guest
+- **plugins.py** — Python plugin system. Loads `.py` files from `~/.xray/plugins/`, extracts `COMMANDS` (Click commands) and `HOOKS` (Python callables keyed by hook type). Plugin commands are lazily added to the CLI via `_XrayGroup`
 - **qmp.py** — QMP (QEMU Monitor Protocol) client over Unix socket for live snapshots
 - **snapshot.py** — Dual-mode: QMP for running VMs (includes memory state), `qemu-img` for stopped VMs
 - **ssh.py** — SSH/SCP utilities with connection-test-based wait (not just port check)
@@ -55,6 +56,7 @@ After install, the `xray` CLI is available. Key commands: `xray base import`, `x
 │   ├── qmp.sock, pid, proxy_port   # Runtime files
 │   └── scripts/{initial-boot,boot}/ # Per-VM hook scripts
 ├── scripts/{initial-boot,boot}/    # User global hook scripts
+├── plugins/                        # Python plugins (.py files with COMMANDS/HOOKS)
 └── default-firewall-rules.conf     # Default allowed domains
 ```
 

@@ -9,12 +9,37 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from . import config, base as base_mod, vm as vm_mod, snapshot as snap_mod, qemu, hooks as hooks_mod
+from . import config, base as base_mod, vm as vm_mod, snapshot as snap_mod, qemu, hooks as hooks_mod, plugins as plugins_mod
 
 console = Console()
 
 
-@click.group()
+class _XrayGroup(click.Group):
+    """Custom Click group that lazily loads plugin commands."""
+
+    _plugins_loaded = False
+
+    def list_commands(self, ctx):
+        self._ensure_plugins()
+        return super().list_commands(ctx)
+
+    def get_command(self, ctx, cmd_name):
+        self._ensure_plugins()
+        return super().get_command(ctx, cmd_name)
+
+    def _ensure_plugins(self):
+        if not self._plugins_loaded:
+            self._plugins_loaded = True
+            plugins_mod.load_all_plugins()
+            builtin = set(self.commands.keys())
+            for cmd in plugins_mod.get_plugin_commands():
+                if cmd.name in builtin:
+                    print(f"[plugins] Warning: '{cmd.name}' conflicts with built-in, skipping")
+                    continue
+                self.add_command(cmd)
+
+
+@click.group(cls=_XrayGroup)
 def main():
     """xray — Fast QEMU VM manager with qcow2 overlays and snapshots."""
 
@@ -168,14 +193,18 @@ def vm_list():
 @click.argument("name")
 @click.option("--display", type=click.Choice(["cocoa", "none", "curses"]), default="cocoa", help="Display type (default: cocoa)")
 @click.option("--no-hooks", is_flag=True, help="Skip running lifecycle hooks")
-def vm_start(name: str, display: str, no_hooks: bool):
+@click.option("--allow-all", is_flag=True, help="Allow all firewall requests without prompting (not persisted)")
+def vm_start(name: str, display: str, no_hooks: bool, allow_all: bool):
     """Start a VM.
 
     The VM runs in the foreground. Press Ctrl+C or close the window to stop.
     """
     try:
-        console.print(f"Starting VM [bold]{name}[/] (Ctrl+C to stop)...")
-        vm_mod.start(name, display=display, run_hooks=not no_hooks)
+        if allow_all:
+            console.print(f"Starting VM [bold]{name}[/] with [yellow]allow-all[/] firewall mode (Ctrl+C to stop)...")
+        else:
+            console.print(f"Starting VM [bold]{name}[/] (Ctrl+C to stop)...")
+        vm_mod.start(name, display=display, run_hooks=not no_hooks, allow_all=allow_all)
         console.print(f"[dim]VM {name} stopped.[/]")
     except (FileNotFoundError, RuntimeError) as e:
         console.print(f"[red]Error:[/] {e}")
@@ -475,8 +504,11 @@ def hooks_list(vm: str):
             console.print("  [dim]No scripts[/]")
         else:
             for source, script_name in scripts:
-                source_color = {"xray": "blue", "user": "green", "vm": "yellow"}.get(source, "white")
-                console.print(f"  [{source_color}][{source}][/] {script_name}")
+                if source.startswith("plugin:"):
+                    source_color = "magenta"
+                else:
+                    source_color = {"xray": "blue", "user": "green", "vm": "yellow"}.get(source, "white")
+                console.print(f"  [{source_color}]\\[{source}][/] {script_name}")
 
     # Show paths
     console.print(f"\n[dim]Script locations:[/]")
@@ -499,17 +531,27 @@ def hooks_run(vm: str, hook_type: str, user: str | None):
         sys.exit(1)
 
     scripts = hooks_mod.get_hook_scripts(vm, hook_type)
-    if not scripts:
-        console.print(f"[yellow]No {hook_type} scripts configured[/]")
+    plugin_hooks = plugins_mod.get_plugin_hooks(hook_type)
+
+    if not scripts and not plugin_hooks:
+        console.print(f"[yellow]No {hook_type} hooks configured[/]")
         return
 
-    # Get SSH user from config if not provided
+    # Get SSH info from config
     if user is None:
         vm_cfg = config.read_vm_config(vm)
         user = vm_cfg.get("ssh_user", "ubuntu")
+    vm_cfg = config.read_vm_config(vm)
+    ssh_port = vm_cfg.get("ssh_port")
 
-    console.print(f"Running {len(scripts)} {hook_type} script(s)...")
-    results = hooks_mod.run_hook_scripts(vm, hook_type, ssh_user=user)
+    total = len(scripts) + len(plugin_hooks)
+    console.print(f"Running {total} {hook_type} hook(s)...")
+
+    results = []
+    if scripts:
+        results.extend(hooks_mod.run_hook_scripts(vm, hook_type, ssh_user=user))
+    if plugin_hooks and ssh_port:
+        results.extend(plugins_mod.run_plugin_hooks(hook_type, vm, ssh_port, ssh_user=user))
 
     # Show results
     success_count = sum(1 for _, _, success, _ in results if success)
@@ -523,7 +565,7 @@ def hooks_run(vm: str, hook_type: str, user: str | None):
                 console.print(f"    {output}")
         sys.exit(1)
     else:
-        console.print(f"[green]All {success_count} script(s) completed successfully[/]")
+        console.print(f"[green]All {success_count} hook(s) completed successfully[/]")
 
 
 @hooks_group.command("reset-initial-boot")

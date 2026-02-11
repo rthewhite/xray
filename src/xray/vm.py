@@ -106,7 +106,7 @@ def _stop_proxy(vm_name: str) -> None:
         del _proxy_servers[vm_name]
 
 
-def _run_proxy_thread(vm_name: str, proxy_port_file: Path) -> None:
+def _run_proxy_thread(vm_name: str, proxy_port_file: Path, allow_all: bool = False) -> None:
     """Run the SOCKS5 proxy in a background thread."""
     # Suppress thread exception output on abrupt shutdown
     threading.excepthook = lambda args: None  # type: ignore[assignment]
@@ -115,6 +115,9 @@ def _run_proxy_thread(vm_name: str, proxy_port_file: Path) -> None:
     asyncio.set_event_loop(loop)
 
     def check_rule(dest_ip: str, dest_port: int) -> str | None:
+        if allow_all:
+            print(f"[firewall] {dest_ip}:{dest_port} -> allowed (allow-all mode)")
+            return "allow"
         return _check_firewall_rule(vm_name, dest_ip, dest_port)
 
     server, port = loop.run_until_complete(
@@ -222,6 +225,7 @@ def start(
     name: str,
     display: str = "cocoa",
     run_hooks: bool = True,
+    allow_all: bool = False,
 ) -> None:
     """Start a VM with firewall proxy. Runs in foreground until VM shuts down.
 
@@ -229,6 +233,7 @@ def start(
         name: VM name
         display: Display type (cocoa, none, curses)
         run_hooks: Run lifecycle hooks (default True)
+        allow_all: Allow all firewall requests without prompting or persisting
     """
     if not config.vm_dir(name).exists():
         raise FileNotFoundError(f"VM '{name}' not found")
@@ -242,7 +247,7 @@ def start(
 
     proxy_thread = threading.Thread(
         target=_run_proxy_thread,
-        args=(name, proxy_port_file),
+        args=(name, proxy_port_file, allow_all),
         daemon=True,  # Daemon thread - will be killed when main exits
     )
     proxy_thread.start()

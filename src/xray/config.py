@@ -35,6 +35,11 @@ def claude_creds_dir() -> Path:
     return creds_dir
 
 
+def plugins_dir() -> Path:
+    """Get path to the plugins directory."""
+    return xray_home() / "plugins"
+
+
 def read_firewall_rules(name: str) -> dict[str, str]:
     """Read firewall rules from VM config.
 
