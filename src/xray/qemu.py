@@ -130,7 +130,7 @@ def build_start_command(
     qmp_sock_path: Path,
     memory: int = 2048,
     cpus: int = 2,
-    display: str = "cocoa",
+    display: str = "cocoa,gl=on",
     ports: list[str] | None = None,
     ssh_port: int | None = None,
     proxy_port: int | None = None,
@@ -178,13 +178,6 @@ def build_start_command(
 
     cmd += ["-netdev", netdev]
 
-    # Claude credentials directory via virtio-9p (always enabled)
-    claude_dir = config.claude_creds_dir()
-    cmd += [
-        "-virtfs",
-        f"local,path={claude_dir},mount_tag=claude_creds,security_model=mapped-xattr"
-    ]
-
     # QMP socket for management
     cmd += ["-qmp", f"unix:{qmp_sock_path},server,nowait"]
 
@@ -193,5 +186,6 @@ def build_start_command(
         cmd += ["-nographic"]
     else:
         cmd += ["-display", display]
+    
 
     return cmd

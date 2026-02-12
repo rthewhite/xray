@@ -19,6 +19,9 @@ _proxy_servers: dict[str, proxy.SOCKS5Server] = {}
 _proxy_loops: dict[str, asyncio.AbstractEventLoop] = {}
 _proxy_threads: dict[str, threading.Thread] = {}
 
+# Set of VM names whose proxy is being intentionally stopped (don't restart)
+_proxy_intentional_stop: set[str] = set()
+
 # Lock to serialize firewall notifications (one at a time)
 _notification_lock = threading.Lock()
 
@@ -92,27 +95,37 @@ def _check_firewall_rule(vm_name: str, dest_ip: str, dest_port: int) -> str | No
 
 def _stop_proxy(vm_name: str) -> None:
     """Stop the proxy server for a VM."""
-    # Just clean up references - daemon thread will be killed on exit
-    if vm_name in _proxy_loops:
+    # Signal the proxy thread to NOT restart after stopping
+    _proxy_intentional_stop.add(vm_name)
+
+    loop = _proxy_loops.get(vm_name)
+    server = _proxy_servers.get(vm_name)
+
+    if loop and server and loop.is_running():
+        # Close the server first to stop accepting new connections,
+        # preventing coroutine cleanup errors from new connections during shutdown
         try:
-            loop = _proxy_loops[vm_name]
-            loop.call_soon_threadsafe(loop.stop)
+            future = asyncio.run_coroutine_threadsafe(server.stop(), loop)
+            future.result(timeout=2)
         except Exception:
             pass
-        del _proxy_loops[vm_name]
-    if vm_name in _proxy_threads:
-        del _proxy_threads[vm_name]
-    if vm_name in _proxy_servers:
-        del _proxy_servers[vm_name]
+
+    if loop and loop.is_running():
+        loop.call_soon_threadsafe(loop.stop)
+
+    _proxy_loops.pop(vm_name, None)
+    _proxy_threads.pop(vm_name, None)
+    _proxy_servers.pop(vm_name, None)
+    _proxy_intentional_stop.discard(vm_name)
 
 
 def _run_proxy_thread(vm_name: str, proxy_port_file: Path, allow_all: bool = False) -> None:
-    """Run the SOCKS5 proxy in a background thread."""
-    # Suppress thread exception output on abrupt shutdown
-    threading.excepthook = lambda args: None  # type: ignore[assignment]
+    """Run the SOCKS5 proxy in a background thread with auto-restart."""
+    import traceback
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    MAX_RESTARTS = 5
+    restart_delay = 1.0
+    bound_port: int | None = None
 
     def check_rule(dest_ip: str, dest_port: int) -> str | None:
         if allow_all:
@@ -120,31 +133,78 @@ def _run_proxy_thread(vm_name: str, proxy_port_file: Path, allow_all: bool = Fal
             return "allow"
         return _check_firewall_rule(vm_name, dest_ip, dest_port)
 
-    server, port = loop.run_until_complete(
-        proxy.run_proxy_for_vm(vm_name, check_rule)
-    )
+    for attempt in range(MAX_RESTARTS + 1):
+        if vm_name in _proxy_intentional_stop:
+            return
 
-    # Store port in file so QEMU can read it
-    proxy_port_file.write_text(str(port))
+        if attempt > 0:
+            print(f"[proxy] Restarting proxy (attempt {attempt + 1}/{MAX_RESTARTS + 1})...", flush=True)
+            time.sleep(restart_delay)
+            restart_delay = min(restart_delay * 2, 10.0)
 
-    # Store server and loop reference for cleanup
-    _proxy_servers[vm_name] = server
-    _proxy_loops[vm_name] = loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-    # Run until stopped
-    try:
-        loop.run_forever()
-    finally:
-        # Stop accepting new connections
-        loop.run_until_complete(server.stop())
-        # Cancel all pending tasks
-        pending = asyncio.all_tasks(loop)
-        for task in pending:
-            task.cancel()
-        # Wait for tasks to complete cancellation
-        if pending:
-            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-        loop.close()
+        # Custom exception handler to prevent the loop from dying on
+        # coroutine cleanup errors (Python 3.14 raises RuntimeError when
+        # a coroutine ignores GeneratorExit during GC)
+        def _loop_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+            exc = context.get("exception")
+            if isinstance(exc, RuntimeError) and "GeneratorExit" in str(exc):
+                return  # Suppress coroutine cleanup errors
+            msg = context.get("message", "Unknown error")
+            print(f"[proxy] asyncio error: {msg}: {exc or ''}", flush=True)
+
+        loop.set_exception_handler(_loop_exception_handler)
+
+        server = None
+        try:
+            if bound_port is not None:
+                # Restart: reuse the same port so QEMU guestfwd still works
+                server = proxy.SOCKS5Server(vm_name, port=bound_port, check_rule=check_rule)
+                port = loop.run_until_complete(server.start())
+            else:
+                server, port = loop.run_until_complete(
+                    proxy.run_proxy_for_vm(vm_name, check_rule)
+                )
+                bound_port = port
+
+            # Store port in file so QEMU can read it
+            proxy_port_file.write_text(str(port))
+
+            # Store server and loop reference for cleanup
+            _proxy_servers[vm_name] = server
+            _proxy_loops[vm_name] = loop
+
+            loop.run_forever()
+
+            # loop.run_forever() returned — check if this was intentional
+            if vm_name in _proxy_intentional_stop:
+                return
+            # Unexpected stop (shouldn't normally happen)
+            print("[proxy] Event loop stopped unexpectedly", flush=True)
+
+        except Exception as e:
+            print(f"[proxy] Proxy crashed: {e}", flush=True)
+            traceback.print_exc()
+        finally:
+            # Clean up the current loop
+            if server is not None:
+                try:
+                    loop.run_until_complete(server.stop())
+                except Exception:
+                    pass
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                try:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                except Exception:
+                    pass
+            loop.close()
+
+    print(f"[proxy] FATAL: Proxy failed after {MAX_RESTARTS + 1} attempts, giving up.", flush=True)
 
 
 def create(
@@ -318,9 +378,17 @@ def start(
         except Exception as e:
             print(f"[hooks] Error running boot hooks: {e}")
 
-    # Wait for QEMU to exit
+    # Wait for QEMU to exit, monitoring proxy health
     try:
-        proc.wait()
+        while True:
+            try:
+                proc.wait(timeout=5)
+                break  # QEMU exited
+            except subprocess.TimeoutExpired:
+                # Check if proxy thread is still alive
+                pt = _proxy_threads.get(name)
+                if pt and not pt.is_alive():
+                    print("[proxy] WARNING: Proxy thread died — VM has no internet", flush=True)
     finally:
         # Stop the proxy server cleanly
         _stop_proxy(name)
@@ -369,13 +437,8 @@ def stop(name: str, force: bool = False) -> None:
         except ProcessLookupError:
             pass
 
-    # Stop the proxy server by stopping its event loop
-    if name in _proxy_loops:
-        loop = _proxy_loops[name]
-        loop.call_soon_threadsafe(loop.stop)
-        del _proxy_loops[name]
-    if name in _proxy_servers:
-        del _proxy_servers[name]
+    # Stop the proxy server gracefully
+    _stop_proxy(name)
 
     # Clean up proxy port file
     proxy_port_file = config.vm_dir(name) / "proxy_port"

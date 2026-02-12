@@ -168,12 +168,17 @@ class SOCKS5Server:
             writer.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
             await writer.drain()
 
-            # Relay data bidirectionally
-            await asyncio.gather(
-                self._relay(reader, dest_writer),
-                self._relay(dest_reader, writer),
-                return_exceptions=True,
+            # Relay data bidirectionally; when one direction finishes
+            # (e.g. remote closed), cancel the other to avoid hanging
+            task1 = asyncio.create_task(self._relay(reader, dest_writer))
+            task2 = asyncio.create_task(self._relay(dest_reader, writer))
+            _done, pending = await asyncio.wait(
+                [task1, task2],
+                return_when=asyncio.FIRST_COMPLETED,
             )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
         except asyncio.CancelledError:
             # Server is shutting down - this is expected
