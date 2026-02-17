@@ -141,6 +141,9 @@ xray create my-vm --base ubuntu --memory 8192 --cpus 8
 
 # Add additional port forwards
 xray create my-vm --base ubuntu --port 8080:80 --port 3000:3000
+
+# Create and immediately start the VM
+xray create my-vm --base ubuntu --start
 ```
 
 Each VM automatically gets a unique SSH port assigned (starting from 2222). Use `xray list` to see all VMs and their SSH ports.
@@ -466,6 +469,39 @@ xray start my-vm --no-hooks
 
 ## Configuration
 
+### Global config
+
+xray has a global configuration file at `~/.xray/config.toml` for settings that apply across all VMs.
+
+```bash
+# Show current config
+xray config show
+
+# Set a value
+xray config set autostart true
+
+# Print config file path
+xray config path
+```
+
+#### Available settings
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `autostart` | bool | `false` | Automatically start a VM after `xray create` |
+
+The `autostart` setting can be overridden per-invocation with the `--start` / `--no-start` flag on `xray create`:
+
+```bash
+# Global autostart is off, but start this one VM after creation
+xray create my-vm --base ubuntu --start
+
+# Global autostart is on, but skip it for this VM
+xray create my-vm --base ubuntu --no-start
+```
+
+### Storage
+
 By default, xray stores everything in `~/.xray/`. Override with the `XRAY_HOME` environment variable:
 
 ```bash
@@ -476,6 +512,7 @@ Storage layout:
 
 ```
 ~/.xray/
+├── config.toml                  # Global configuration
 ├── default-firewall-rules.conf  # Default allowed domains for firewall
 ├── scripts/                     # User global hook scripts
 │   ├── initial-boot/

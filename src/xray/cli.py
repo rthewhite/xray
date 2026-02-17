@@ -107,11 +107,12 @@ def base_remove(name: str):
 @main.command("create")
 @click.argument("name")
 @click.option("--base", "-b", "base_name", default=None, help="Base image to use")
-@click.option("--memory", "-m", default=4096, help="Memory in MB (default: 4096)")
+@click.option("--memory", "-m", default=8192, help="Memory in MB (default: 8192)")
 @click.option("--cpus", "-c", default=4, help="Number of CPUs (default: 4)")
 @click.option("--ssh-user", default="ubuntu", help="SSH username in guest (default: ubuntu)")
 @click.option("--port", "-p", "ports", multiple=True, help="Port forward as host:guest (e.g. -p 8080:80)")
-def vm_create(name: str, base_name: str | None, memory: int, cpus: int, ssh_user: str, ports: tuple[str, ...]):
+@click.option("--start/--no-start", default=None, help="Start VM after creation (overrides global autostart setting)")
+def vm_create(name: str, base_name: str | None, memory: int, cpus: int, ssh_user: str, ports: tuple[str, ...], start: bool | None):
     """Create a new VM from a base image.
 
     SSH port is automatically assigned (starting from 2222).
@@ -136,6 +137,17 @@ def vm_create(name: str, base_name: str | None, memory: int, cpus: int, ssh_user
     except (FileNotFoundError, FileExistsError, ValueError) as e:
         console.print(f"[red]Error:[/] {e}")
         sys.exit(1)
+
+    # Autostart: flag overrides global config
+    should_start = start if start is not None else config.get_global("autostart", False)
+    if should_start:
+        try:
+            console.print(f"Starting VM [bold]{name}[/] (Ctrl+C to stop)...")
+            vm_mod.start(name, display="cocoa", run_hooks=True, allow_all=False)
+            console.print(f"[dim]VM {name} stopped.[/]")
+        except (FileNotFoundError, RuntimeError) as e:
+            console.print(f"[red]Error starting VM:[/] {e}")
+            sys.exit(1)
 
 
 @main.command("list")
@@ -665,6 +677,51 @@ def snap_delete(vm: str, snap_name: str):
     except (FileNotFoundError, RuntimeError) as e:
         console.print(f"[red]Error:[/] {e}")
         sys.exit(1)
+
+
+# ── Config commands ──────────────────────────────────────────────────
+
+
+@main.group("config")
+def config_group():
+    """Manage xray global configuration."""
+
+
+@config_group.command("show")
+def config_show():
+    """Show current global configuration."""
+    cfg = config.read_global_config()
+    if not cfg:
+        console.print("[dim]No global config set. Config file:[/]")
+        console.print(f"  {config.global_config_path()}")
+        return
+    for key, value in sorted(cfg.items()):
+        console.print(f"{key} = {value!r}")
+
+
+@config_group.command("set")
+@click.argument("key")
+@click.argument("value")
+def config_set(key: str, value: str):
+    """Set a global config value (e.g. xray config set autostart true)."""
+    # Auto-convert types
+    if value.lower() in ("true", "false"):
+        converted = value.lower() == "true"
+    elif value.isdigit():
+        converted = int(value)
+    else:
+        converted = value
+
+    cfg = config.read_global_config()
+    cfg[key] = converted
+    config.write_global_config(cfg)
+    console.print(f"[green]Set[/] {key} = {converted!r}")
+
+
+@config_group.command("path")
+def config_path():
+    """Print the global config file path."""
+    console.print(str(config.global_config_path()))
 
 
 # ── Helpers ──────────────────────────────────────────────────────────

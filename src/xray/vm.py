@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import config, firewall, hooks, notifier, proxy, qemu, base as base_mod
+from . import config, enrichment, firewall, hooks, notifier, proxy, qemu, base as base_mod
 from .qmp import QMPClient, QMPError
 
 # Track proxy servers and event loops for each VM
@@ -63,13 +63,16 @@ def _check_firewall_rule(vm_name: str, dest_ip: str, dest_port: int) -> str | No
     # Fast path: check if rule already exists (no lock needed for read)
     rules = config.read_firewall_rules(vm_name)
     if rule_key in rules:
-        print(f"[firewall] {rule_key} -> {rules[rule_key]} (existing rule)")
-        return rules[rule_key]
+        decision = rules[rule_key]
+        print(f"[firewall] {rule_key} -> {decision} (existing rule)")
+        enrichment.record_connection(vm_name, dest_ip, dest_port, None, None, decision)
+        return decision
 
     # Check if this matches a default allowed domain
     if _is_default_allowed(dest_ip):
         # Auto-allow and save the rule for future
         config.add_firewall_rule(vm_name, dest_ip, dest_port, "allow")
+        enrichment.record_connection(vm_name, dest_ip, dest_port, None, None, "allow")
         return "allow"
 
     # No rule exists - need to prompt user
@@ -79,16 +82,33 @@ def _check_firewall_rule(vm_name: str, dest_ip: str, dest_port: int) -> str | No
         # Re-check rules in case another thread added it while we waited
         rules = config.read_firewall_rules(vm_name)
         if rule_key in rules:
-            print(f"[firewall] {rule_key} -> {rules[rule_key]} (added while waiting)")
-            return rules[rule_key]
+            decision = rules[rule_key]
+            print(f"[firewall] {rule_key} -> {decision} (added while waiting)")
+            enrichment.record_connection(vm_name, dest_ip, dest_port, None, None, decision)
+            return decision
+
+        # Enrich the connection with domain/process info (best-effort, 5s timeout)
+        print(f"[firewall] {rule_key} -> enriching...")
+        info = enrichment.enrich(vm_name, dest_ip, dest_port)
+        recent = enrichment.get_recent_connections(vm_name)
 
         # Still no rule - show notification and WAIT for response
         print(f"[firewall] {rule_key} -> showing notification...")
-        decision = notifier.show_firewall_alert(vm_name, dest_ip, dest_port)
+        decision = notifier.show_firewall_alert(
+            vm_name, dest_ip, dest_port,
+            domain=info.domain,
+            process_name=info.process_name,
+            recent_connections=recent,
+        )
 
         # Store the decision for future connections
         config.add_firewall_rule(vm_name, dest_ip, dest_port, decision)
         print(f"[firewall] {rule_key} -> user chose: {decision}")
+
+        enrichment.record_connection(
+            vm_name, dest_ip, dest_port,
+            info.domain, info.process_name, decision,
+        )
 
         return decision
 
@@ -392,6 +412,8 @@ def start(
     finally:
         # Stop the proxy server cleanly
         _stop_proxy(name)
+        # Clean up enrichment caches
+        enrichment.clear_vm_state(name)
         # Clean up files
         pid_path.unlink(missing_ok=True)
         qmp_path.unlink(missing_ok=True)

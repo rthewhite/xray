@@ -45,14 +45,27 @@ def _get_service_name(port: int) -> str | None:
     return COMMON_PORTS.get(port)
 
 
-def _format_destination(dest_ip: str, dest_port: int) -> str:
-    """Format destination with hostname and service info if available."""
+def _escape_applescript(s: str) -> str:
+    """Escape a string for safe inclusion in AppleScript double-quoted strings."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _format_destination(
+    dest_ip: str,
+    dest_port: int,
+    domain: str | None = None,
+    process_name: str | None = None,
+) -> str:
+    """Format destination with hostname, domain, process, and service info."""
     lines = []
 
-    # Try to get hostname
-    hostname = _get_hostname(dest_ip)
-    if hostname:
-        lines.append(f"Host: {hostname}")
+    # Domain from DNS interception (preferred) or rDNS fallback
+    if domain:
+        lines.append(f"Domain: {_escape_applescript(domain)}")
+    else:
+        hostname = _get_hostname(dest_ip)
+        if hostname:
+            lines.append(f"Host: {_escape_applescript(hostname)}")
 
     # Add IP:port
     lines.append(f"Address: {dest_ip}:{dest_port}")
@@ -62,13 +75,50 @@ def _format_destination(dest_ip: str, dest_port: int) -> str:
     if service:
         lines.append(f"Service: {service}")
 
+    # Add process info if available
+    if process_name:
+        lines.append(f"Process: {_escape_applescript(process_name)}")
+
     return "\" & return & \"".join(lines)
+
+
+def _format_recent(recent_connections: list) -> str:
+    """Format recent connection decisions for the dialog.
+
+    Args:
+        recent_connections: List of ConnectionRecord objects with
+            domain, dest_ip, dest_port, and decision attributes.
+
+    Returns:
+        Formatted string for AppleScript, or empty string if no records.
+    """
+    if not recent_connections:
+        return ""
+
+    lines = []
+    for rec in recent_connections:
+        prefix = "+" if rec.decision == "allow" else "-"
+        target = rec.domain or rec.dest_ip
+        target = _escape_applescript(target)
+        lines.append(f"  {prefix} {target}:{rec.dest_port} ({rec.decision})")
+
+    # Build AppleScript string fragments that continue from _format_destination.
+    # Each '" & return & "' closes the current string, adds a newline, and opens a new one.
+    ret = '" & return & "'
+    # Extra blank line before "Recent:" header
+    parts = [ret + ret + "Recent:"]
+    for line in lines:
+        parts.append(ret + line)
+    return "".join(parts)
 
 
 def show_firewall_alert(
     vm_name: str,
     dest_ip: str,
     dest_port: int,
+    domain: str | None = None,
+    process_name: str | None = None,
+    recent_connections: list | None = None,
 ) -> str:
     """Show a macOS notification asking to allow/deny a connection.
 
@@ -78,12 +128,21 @@ def show_firewall_alert(
         vm_name: Name of the VM
         dest_ip: Destination IP address
         dest_port: Destination port
+        domain: Domain name from DNS interception (if available)
+        process_name: Guest process name (if available)
+        recent_connections: Recent ConnectionRecord objects for context
 
     Returns:
         "allow" or "deny" based on user choice
     """
     # Format destination with additional info
-    dest_info = _format_destination(dest_ip, dest_port)
+    dest_info = _format_destination(dest_ip, dest_port, domain=domain, process_name=process_name)
+
+    # Format recent connections section
+    recent_section = _format_recent(recent_connections or [])
+
+    # Escape VM name for AppleScript
+    safe_vm_name = _escape_applescript(vm_name)
 
     # Use osascript to show a dialog
     # Activate Terminal first to ensure the dialog appears in front
@@ -93,7 +152,7 @@ def show_firewall_alert(
         activate
     end tell
     delay 0.1
-    display dialog "VM '{vm_name}' wants to connect to:" & return & return & "{dest_info}" & return & return & "Allow this connection?" ¬
+    display dialog "VM '{safe_vm_name}' wants to connect to:" & return & return & "{dest_info}{recent_section}" & return & return & "Allow this connection?" ¬
         buttons {{"Deny", "Allow"}} ¬
         default button "Deny" ¬
         with title "xray Firewall" ¬

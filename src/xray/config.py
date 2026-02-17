@@ -40,6 +40,32 @@ def plugins_dir() -> Path:
     return xray_home() / "plugins"
 
 
+def global_config_path() -> Path:
+    """Return the path to the global xray config file."""
+    return xray_home() / "config.toml"
+
+
+def read_global_config() -> dict:
+    """Read the global config file, returning {} if missing."""
+    path = global_config_path()
+    if not path.exists():
+        return {}
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+
+def write_global_config(cfg: dict) -> None:
+    """Write the global config file."""
+    path = global_config_path()
+    with open(path, "wb") as f:
+        tomli_w.dump(cfg, f)
+
+
+def get_global(key: str, default=None):
+    """Get a value from the global config."""
+    return read_global_config().get(key, default)
+
+
 def read_firewall_rules(name: str) -> dict[str, str]:
     """Read firewall rules from VM config.
 
