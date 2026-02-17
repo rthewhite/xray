@@ -10,7 +10,13 @@ and HOOKS variables for registration — no xray imports required:
     def deploy(vm):
         click.echo(f"Deploying to {vm}...")
 
-    def sync_dotfiles(vm_name, ssh_port, ssh_user, ssh_host):
+    def sync_dotfiles(vm_name, ssh_port, ssh_user, ssh_host, helpers):
+        # Read/write plugin settings in vm.toml (scoped to this plugin)
+        last_sync = helpers.get("last_sync")
+        helpers.set("last_sync", "2024-01-01")
+        helpers.delete("old_key")
+        all_settings = helpers.get_all()
+
         import subprocess
         subprocess.run(["scp", "-P", str(ssh_port), ...])
 
@@ -28,6 +34,50 @@ from pathlib import Path
 import click
 
 from . import config
+
+
+class PluginHelpers:
+    """Scoped settings access for a plugin within a VM's vm.toml.
+
+    Settings are stored under [plugins.<plugin_name>] in the VM config.
+    A plugin can only read and modify its own settings.
+    """
+
+    def __init__(self, vm_name: str, plugin_name: str):
+        self._vm_name = vm_name
+        self._plugin_name = plugin_name
+
+    def get(self, key: str, default=None):
+        """Read a setting for this plugin."""
+        vm_cfg = config.read_vm_config(self._vm_name)
+        return vm_cfg.get("plugins", {}).get(self._plugin_name, {}).get(key, default)
+
+    def get_all(self) -> dict:
+        """Read all settings for this plugin."""
+        vm_cfg = config.read_vm_config(self._vm_name)
+        return dict(vm_cfg.get("plugins", {}).get(self._plugin_name, {}))
+
+    def set(self, key: str, value) -> None:
+        """Write a setting for this plugin."""
+        vm_cfg = config.read_vm_config(self._vm_name)
+        plugins_section = vm_cfg.setdefault("plugins", {})
+        plugin_section = plugins_section.setdefault(self._plugin_name, {})
+        plugin_section[key] = value
+        config.write_vm_config(self._vm_name, vm_cfg)
+
+    def delete(self, key: str) -> None:
+        """Delete a setting for this plugin. No-op if key doesn't exist."""
+        vm_cfg = config.read_vm_config(self._vm_name)
+        plugin_section = vm_cfg.get("plugins", {}).get(self._plugin_name, {})
+        if key in plugin_section:
+            del plugin_section[key]
+            # Clean up empty sections
+            if not plugin_section:
+                del vm_cfg["plugins"][self._plugin_name]
+                if not vm_cfg["plugins"]:
+                    del vm_cfg["plugins"]
+            config.write_vm_config(self._vm_name, vm_cfg)
+
 
 # Module-level registry populated by load_all_plugins()
 _plugin_commands: list[tuple[str, click.BaseCommand]] = []
@@ -142,6 +192,7 @@ def run_plugin_hooks(
     for plugin_name, fn in hooks:
         source = f"plugin:{plugin_name}"
         fn_name = fn.__name__
+        helpers = PluginHelpers(vm_name, plugin_name)
         print(f"[hooks] Running {hook_type}/{fn_name} ({source})...", flush=True)
 
         try:
@@ -150,6 +201,7 @@ def run_plugin_hooks(
                 ssh_port=ssh_port,
                 ssh_user=ssh_user,
                 ssh_host=ssh_host,
+                helpers=helpers,
             )
             results.append((source, fn_name, True, ""))
             print(f"[hooks] {fn_name} completed", flush=True)
