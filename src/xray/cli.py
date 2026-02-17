@@ -14,6 +14,14 @@ from . import config, base as base_mod, vm as vm_mod, snapshot as snap_mod, qemu
 console = Console()
 
 
+def _complete_vm_names(ctx, param, incomplete):
+    return [name for name in config.list_vms() if name.startswith(incomplete)]
+
+
+def _complete_base_names(ctx, param, incomplete):
+    return [name for name in config.list_bases() if name.startswith(incomplete)]
+
+
 class _XrayGroup(click.Group):
     """Custom Click group that lazily loads plugin commands."""
 
@@ -90,7 +98,7 @@ def base_import(path: Path, name: str | None, link: bool):
 
 
 @base_group.command("remove")
-@click.argument("name")
+@click.argument("name", shell_complete=_complete_base_names)
 def base_remove(name: str):
     """Remove a base image."""
     try:
@@ -106,7 +114,7 @@ def base_remove(name: str):
 
 @main.command("create")
 @click.argument("name")
-@click.option("--base", "-b", "base_name", default=None, help="Base image to use")
+@click.option("--base", "-b", "base_name", default=None, help="Base image to use", shell_complete=_complete_base_names)
 @click.option("--memory", "-m", default=8192, help="Memory in MB (default: 8192)")
 @click.option("--cpus", "-c", default=4, help="Number of CPUs (default: 4)")
 @click.option("--ssh-user", default="ubuntu", help="SSH username in guest (default: ubuntu)")
@@ -129,7 +137,7 @@ def vm_create(name: str, base_name: str | None, memory: int, cpus: int, ssh_user
             console.print(f"  {i}. {b}")
         choice = click.prompt("Select base image", type=click.IntRange(1, len(bases)))
         base_name = bases[choice - 1]
-
+        
     try:
         ssh_port = vm_mod.create(name, base_name, memory=memory, cpus=cpus, ports=list(ports), ssh_user=ssh_user)
         console.print(f"[green]Created VM:[/] {name} (base: {base_name})")
@@ -202,7 +210,7 @@ def vm_list():
 
 
 @main.command("start")
-@click.argument("name")
+@click.argument("name", shell_complete=_complete_vm_names)
 @click.option("--display", type=click.Choice(["cocoa", "none", "curses"]), default="cocoa", help="Display type (default: cocoa)")
 @click.option("--no-hooks", is_flag=True, help="Skip running lifecycle hooks")
 @click.option("--allow-all", is_flag=True, help="Allow all firewall requests without prompting (not persisted)")
@@ -224,7 +232,7 @@ def vm_start(name: str, display: str, no_hooks: bool, allow_all: bool):
 
 
 @main.command("stop")
-@click.argument("name")
+@click.argument("name", shell_complete=_complete_vm_names)
 @click.option("--force", "-f", is_flag=True, help="Force kill instead of graceful shutdown")
 def vm_stop(name: str, force: bool):
     """Stop a running VM."""
@@ -237,7 +245,7 @@ def vm_stop(name: str, force: bool):
 
 
 @main.command("remove")
-@click.argument("name")
+@click.argument("name", shell_complete=_complete_vm_names)
 @click.option("--force", "-f", is_flag=True, help="Skip confirmation")
 def vm_remove(name: str, force: bool):
     """Delete a VM and all its files."""
@@ -252,7 +260,7 @@ def vm_remove(name: str, force: bool):
 
 
 @main.command("info")
-@click.argument("name")
+@click.argument("name", shell_complete=_complete_vm_names)
 def vm_info(name: str):
     """Show detailed info about a VM."""
     try:
@@ -306,7 +314,7 @@ def port_group():
 
 
 @port_group.command("add")
-@click.argument("vm")
+@click.argument("vm", shell_complete=_complete_vm_names)
 @click.argument("mapping", metavar="HOST:GUEST")
 def port_add(vm: str, mapping: str):
     """Add a port forward rule (e.g. xray port add my-vm 8080:80)."""
@@ -321,7 +329,7 @@ def port_add(vm: str, mapping: str):
 
 
 @port_group.command("list")
-@click.argument("vm")
+@click.argument("vm", shell_complete=_complete_vm_names)
 def port_list(vm: str):
     """List port forwarding rules for a VM."""
     try:
@@ -345,7 +353,7 @@ def port_list(vm: str):
 
 
 @port_group.command("remove")
-@click.argument("vm")
+@click.argument("vm", shell_complete=_complete_vm_names)
 @click.argument("mapping", metavar="HOST:GUEST")
 def port_remove(vm: str, mapping: str):
     """Remove a port forward rule (e.g. xray port remove my-vm 8080:80)."""
@@ -367,7 +375,7 @@ def firewall_group():
 
 
 @firewall_group.command("list")
-@click.argument("vm")
+@click.argument("vm", shell_complete=_complete_vm_names)
 def firewall_list(vm: str):
     """List firewall rules for a VM."""
     if not config.vm_dir(vm).exists():
@@ -392,7 +400,7 @@ def firewall_list(vm: str):
 
 
 @firewall_group.command("add")
-@click.argument("vm")
+@click.argument("vm", shell_complete=_complete_vm_names)
 @click.argument("destination")  # Format: IP:PORT
 @click.argument("action", type=click.Choice(["allow", "deny"]))
 def firewall_add(vm: str, destination: str, action: str):
@@ -417,7 +425,7 @@ def firewall_add(vm: str, destination: str, action: str):
 
 
 @firewall_group.command("remove")
-@click.argument("vm")
+@click.argument("vm", shell_complete=_complete_vm_names)
 @click.argument("destination")  # Format: IP:PORT
 def firewall_remove(vm: str, destination: str):
     """Remove a firewall rule (e.g. xray firewall remove my-vm 1.1.1.1:443)."""
@@ -439,7 +447,7 @@ def firewall_remove(vm: str, destination: str):
 
 
 @firewall_group.command("clear")
-@click.argument("vm")
+@click.argument("vm", shell_complete=_complete_vm_names)
 @click.confirmation_option(prompt="Clear all firewall rules?")
 def firewall_clear(vm: str):
     """Clear all firewall rules for a VM."""
@@ -454,7 +462,7 @@ def firewall_clear(vm: str):
 
 
 @firewall_group.command("status")
-@click.argument("vm")
+@click.argument("vm", shell_complete=_complete_vm_names)
 def firewall_status(vm: str):
     """Show firewall status for a VM."""
     if not config.vm_dir(vm).exists():
@@ -492,7 +500,7 @@ def hooks_group():
 
 
 @hooks_group.command("list")
-@click.argument("vm")
+@click.argument("vm", shell_complete=_complete_vm_names)
 def hooks_list(vm: str):
     """List all hooks that will run for a VM."""
     if not config.vm_dir(vm).exists():
@@ -529,7 +537,7 @@ def hooks_list(vm: str):
 
 
 @hooks_group.command("run")
-@click.argument("vm")
+@click.argument("vm", shell_complete=_complete_vm_names)
 @click.argument("hook_type", type=click.Choice(["initial-boot", "boot"]))
 @click.option("--user", "-u", default=None, help="SSH username (default: from VM config)")
 def hooks_run(vm: str, hook_type: str, user: str | None):
@@ -581,7 +589,7 @@ def hooks_run(vm: str, hook_type: str, user: str | None):
 
 
 @hooks_group.command("reset-initial-boot")
-@click.argument("vm")
+@click.argument("vm", shell_complete=_complete_vm_names)
 def hooks_reset_initial_boot(vm: str):
     """Reset initial-boot flag so initial-boot scripts run again."""
     if not config.vm_dir(vm).exists():
@@ -596,7 +604,7 @@ def hooks_reset_initial_boot(vm: str):
 
 
 @hooks_group.command("init")
-@click.argument("vm", required=False)
+@click.argument("vm", required=False, shell_complete=_complete_vm_names)
 def hooks_init(vm: str | None):
     """Create scripts directories for user/VM hooks.
 
@@ -625,7 +633,7 @@ def snapshot_group():
 
 
 @snapshot_group.command("create")
-@click.argument("vm")
+@click.argument("vm", shell_complete=_complete_vm_names)
 @click.argument("snap_name")
 def snap_create(vm: str, snap_name: str):
     """Create a snapshot of a VM."""
@@ -639,7 +647,7 @@ def snap_create(vm: str, snap_name: str):
 
 
 @snapshot_group.command("list")
-@click.argument("vm")
+@click.argument("vm", shell_complete=_complete_vm_names)
 def snap_list(vm: str):
     """List snapshots of a VM."""
     try:
@@ -654,7 +662,7 @@ def snap_list(vm: str):
 
 
 @snapshot_group.command("revert")
-@click.argument("vm")
+@click.argument("vm", shell_complete=_complete_vm_names)
 @click.argument("snap_name")
 def snap_revert(vm: str, snap_name: str):
     """Revert a VM to a snapshot."""
@@ -667,7 +675,7 @@ def snap_revert(vm: str, snap_name: str):
 
 
 @snapshot_group.command("delete")
-@click.argument("vm")
+@click.argument("vm", shell_complete=_complete_vm_names)
 @click.argument("snap_name")
 def snap_delete(vm: str, snap_name: str):
     """Delete a snapshot."""

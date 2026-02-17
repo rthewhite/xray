@@ -10,13 +10,55 @@ Requires Python 3.11+ and QEMU:
 brew install qemu
 ```
 
-Then install xray:
+### Global install (recommended)
+
+Install with [pipx](https://pipx.pypa.io/) so `xray` is available everywhere:
 
 ```bash
+brew install pipx
+git clone https://github.com/your-user/xray.git
+pipx install ./xray
+```
+
+To update after pulling new changes:
+
+```bash
+pipx install ./xray --force
+```
+
+### Development install
+
+If you want to hack on xray itself, you can use pipx with `--editable` so changes to the source are reflected immediately:
+
+```bash
+git clone https://github.com/your-user/xray.git
+pipx install --editable ./xray
+```
+
+Or with a traditional venv:
+
+```bash
+cd xray
 python3 -m venv venv
 source venv/bin/activate
 pip install -e .
 ```
+
+## Shell Completion
+
+xray supports tab completion for commands, VM names, and base image names. Add one of these lines to your shell config (one-time setup):
+
+**Zsh** (`~/.zshrc`):
+```bash
+eval "$(_XRAY_COMPLETE=zsh_source xray)"
+```
+
+**Bash** (`~/.bashrc` or `~/.bash_profile`):
+```bash
+eval "$(_XRAY_COMPLETE=bash_source xray)"
+```
+
+Then restart your shell or `source` the file. After that, `xray start <TAB>` will autocomplete VM names, `xray base remove <TAB>` will autocomplete base image names, etc.
 
 ## Quick start
 
