@@ -131,12 +131,15 @@ def vm_create(name: str, base_name: str | None, memory: int, cpus: int, ssh_user
         if not bases:
             console.print("[red]No base images available.[/] Import one first: xray base import <path>")
             sys.exit(1)
-        # Always show picker
-        console.print("[bold]Available base images:[/]")
-        for i, b in enumerate(bases, 1):
-            console.print(f"  {i}. {b}")
-        choice = click.prompt("Select base image", type=click.IntRange(1, len(bases)))
-        base_name = bases[choice - 1]
+        if len(bases) == 1:
+            base_name = bases[0]
+            console.print(f"[dim]Using base image:[/] {base_name}")
+        else:
+            console.print("[bold]Available base images:[/]")
+            for i, b in enumerate(bases, 1):
+                console.print(f"  {i}. {b}")
+            choice = click.prompt("Select base image", type=click.IntRange(1, len(bases)))
+            base_name = bases[choice - 1]
         
     try:
         ssh_port = vm_mod.create(name, base_name, memory=memory, cpus=cpus, ports=list(ports), ssh_user=ssh_user)
@@ -217,12 +220,15 @@ def vm_list():
 @click.option("--display", type=click.Choice(["cocoa", "none", "curses"]), default="cocoa", help="Display type (default: cocoa)")
 @click.option("--no-hooks", is_flag=True, help="Skip running lifecycle hooks")
 @click.option("--allow-all", is_flag=True, help="Allow all firewall requests without prompting (not persisted)")
-def vm_start(name: str, display: str, no_hooks: bool, allow_all: bool):
+@click.option("--verbose", "-v", is_flag=True, help="Show detailed firewall/enrichment output")
+def vm_start(name: str, display: str, no_hooks: bool, allow_all: bool, verbose: bool):
     """Start a VM.
 
     The VM runs in the foreground. Press Ctrl+C or close the window to stop.
     """
     try:
+        if verbose:
+            config.set_verbose(True)
         if allow_all:
             console.print(f"Starting VM [bold]{name}[/] with [yellow]allow-all[/] firewall mode (Ctrl+C to stop)...")
         else:

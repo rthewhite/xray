@@ -9,6 +9,18 @@ import tomllib
 import tomli_w
 
 
+_verbose = False
+
+
+def set_verbose(v: bool = True) -> None:
+    global _verbose
+    _verbose = v
+
+
+def is_verbose() -> bool:
+    return _verbose
+
+
 def xray_home() -> Path:
     """Return the xray home directory, creating it if needed."""
     home = Path(os.environ.get("XRAY_HOME", Path.home() / ".xray"))

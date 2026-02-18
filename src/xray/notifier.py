@@ -5,6 +5,8 @@ from __future__ import annotations
 import socket
 import subprocess
 
+from . import config
+
 
 # Common port to service name mapping
 COMMON_PORTS = {
@@ -161,33 +163,40 @@ def show_firewall_alert(
     '''
 
     try:
-        print(f"[notifier] Showing alert for {vm_name} -> {dest_ip}:{dest_port}")
+        verbose = config.is_verbose()
+        if verbose:
+            print(f"[notifier] Showing alert for {vm_name} -> {dest_ip}:{dest_port}")
         result = subprocess.run(
             ["osascript", "-e", script],
             capture_output=True,
             text=True,
             timeout=300,  # 5 minute timeout
         )
-        print(f"[notifier] osascript returned: stdout={result.stdout!r}, stderr={result.stderr!r}, rc={result.returncode}")
+        if verbose:
+            print(f"[notifier] osascript returned: stdout={result.stdout!r}, stderr={result.stderr!r}, rc={result.returncode}")
 
         # osascript returns "button returned:Allow" or "button returned:Deny"
         # "gave up:true" means timeout
         if "gave up:true" in result.stdout:
-            print(f"[notifier] Dialog timed out - defaulting to deny")
+            if verbose:
+                print(f"[notifier] Dialog timed out - defaulting to deny")
             return "deny"
         elif "Allow" in result.stdout:
-            print(f"[notifier] User chose ALLOW")
+            if verbose:
+                print(f"[notifier] User chose ALLOW")
             return "allow"
         else:
-            print(f"[notifier] User chose DENY (or dialog was cancelled)")
+            if verbose:
+                print(f"[notifier] User chose DENY (or dialog was cancelled)")
             return "deny"
 
     except subprocess.TimeoutExpired:
         # Default to deny if user doesn't respond
-        print(f"[notifier] Timeout - defaulting to deny")
+        if config.is_verbose():
+            print(f"[notifier] Timeout - defaulting to deny")
         return "deny"
     except Exception as e:
-        # Default to deny on error
+        # Default to deny on error (always visible)
         print(f"[notifier] Error showing notification: {e}")
         return "deny"
 

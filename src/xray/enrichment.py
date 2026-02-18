@@ -14,6 +14,11 @@ from dataclasses import dataclass, field
 
 from . import config, ssh
 
+def _vprint(*args, **kwargs):
+    """Print only if verbose mode is enabled."""
+    if config.is_verbose():
+        print(*args, **kwargs)
+
 
 @dataclass
 class EnrichmentResult:
@@ -86,13 +91,13 @@ def enrich(vm_name: str, dest_ip: str, dest_port: int) -> EnrichmentResult:
         )
 
         if stderr.strip():
-            print(f"[enrich] xray-enrich debug: {stderr.strip()}")
+            _vprint(f"[enrich] xray-enrich debug: {stderr.strip()}")
 
         if rc != 0 and not stdout.strip():
-            print(f"[enrich] xray-enrich failed (rc={rc})")
+            _vprint(f"[enrich] xray-enrich failed (rc={rc})")
             return result
 
-        print(f"[enrich] xray-enrich output: {stdout.strip()!r}")
+        _vprint(f"[enrich] xray-enrich output: {stdout.strip()!r}")
 
         # Parse key=value output
         for line in stdout.strip().splitlines():
@@ -117,7 +122,7 @@ def enrich(vm_name: str, dest_ip: str, dest_port: int) -> EnrichmentResult:
                 _dns_cache[vm_name][dest_ip] = result.domain
 
     except Exception as e:
-        print(f"[enrich] error: {e}")
+        _vprint(f"[enrich] error: {e}")
 
     return result
 

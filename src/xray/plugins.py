@@ -29,11 +29,38 @@ and HOOKS variables for registration — no xray imports required:
 from __future__ import annotations
 
 import importlib.util
+import io
+import sys
 from pathlib import Path
 
 import click
 
 from . import config, ssh as ssh_mod
+
+
+class _PrefixedWriter:
+    """Wraps a file object to prefix each complete line."""
+
+    def __init__(self, wrapped, prefix: str):
+        self._wrapped = wrapped
+        self._prefix = prefix
+        self._buf = ""
+
+    def write(self, s):
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            self._wrapped.write(f"{self._prefix}{line}\n")
+        return len(s)
+
+    def flush(self):
+        if self._buf:
+            self._wrapped.write(f"{self._prefix}{self._buf}")
+            self._buf = ""
+        self._wrapped.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
 
 
 class PluginHelpers:
@@ -243,10 +270,16 @@ def run_plugin_hooks(
         print(f"[hooks] Running {hook_type}/{fn_name} ({source})...", flush=True)
 
         try:
-            fn(
-                vm_name=vm_name,
-                helpers=helpers,
-            )
+            old_stdout = sys.stdout
+            sys.stdout = _PrefixedWriter(old_stdout, "[hooks]   ")
+            try:
+                fn(
+                    vm_name=vm_name,
+                    helpers=helpers,
+                )
+            finally:
+                sys.stdout.flush()
+                sys.stdout = old_stdout
             results.append((source, fn_name, True, ""))
             print(f"[hooks] {fn_name} completed", flush=True)
         except Exception as e:

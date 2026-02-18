@@ -2,237 +2,15 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 import shutil
 import signal
 import subprocess
-import threading
 import time
 from pathlib import Path
 
-from . import config, enrichment, firewall, hooks, notifier, proxy, qemu, base as base_mod
+from . import config, enrichment, firewall, hooks, proxy, qemu, base as base_mod
 from .qmp import QMPClient, QMPError
-
-# Track proxy servers and event loops for each VM
-_proxy_servers: dict[str, proxy.SOCKS5Server] = {}
-_proxy_loops: dict[str, asyncio.AbstractEventLoop] = {}
-_proxy_threads: dict[str, threading.Thread] = {}
-
-# Set of VM names whose proxy is being intentionally stopped (don't restart)
-_proxy_intentional_stop: set[str] = set()
-
-# Lock to serialize firewall notifications (one at a time)
-_notification_lock = threading.Lock()
-
-
-def _matches_default_domain(hostname: str) -> str | None:
-    """Check if hostname matches any default allowed domain.
-
-    Returns the matched domain pattern, or None.
-    """
-    default_domains = firewall.get_default_allowed_domains()
-    if not default_domains:
-        return None
-    hostname_lower = hostname.lower()
-    for domain in default_domains:
-        if hostname_lower == domain or hostname_lower.endswith("." + domain):
-            return domain
-    return None
-
-
-def _check_firewall_rule(vm_name: str, dest_ip: str, dest_port: int) -> str | None:
-    """Check if a connection is allowed/denied by firewall rules.
-
-    This function BLOCKS until the user responds to the notification.
-    Multiple connections to the same IP:port will queue up and wait.
-
-    Returns:
-        "allow" if explicitly allowed
-        "deny" if explicitly denied or user denies
-    """
-    rule_key = f"{dest_ip}:{dest_port}"
-
-    # Fast path: check if rule already exists (no lock needed for read)
-    rules = config.read_firewall_rules(vm_name)
-    if rule_key in rules:
-        decision = rules[rule_key]
-        print(f"[firewall] {rule_key} -> {decision} (existing rule)")
-        enrichment.record_connection(vm_name, dest_ip, dest_port, None, None, decision)
-        return decision
-
-    # Enrich the connection with domain/process info from the guest's
-    # dnsmasq log. This tells us which domain resolved to this IP, which
-    # reverse DNS cannot reliably do (CDN/cloud IPs return provider names).
-    print(f"[firewall] {rule_key} -> enriching...")
-    info = enrichment.enrich(vm_name, dest_ip, dest_port)
-
-    # Check if the enriched domain matches a default allowed domain
-    if info.domain:
-        match = _matches_default_domain(info.domain)
-        if match:
-            print(f"[firewall] {dest_ip} ({info.domain}) -> auto-allowed (matches default: {match})")
-            config.add_firewall_rule(vm_name, dest_ip, dest_port, "allow")
-            enrichment.record_connection(vm_name, dest_ip, dest_port, info.domain, None, "allow")
-            return "allow"
-
-    # Fallback: try reverse DNS (works for IPs with correct PTR records)
-    hostname = notifier._get_hostname(dest_ip)
-    if hostname:
-        match = _matches_default_domain(hostname)
-        if match:
-            print(f"[firewall] {dest_ip} ({hostname}) -> auto-allowed (matches default: {match})")
-            config.add_firewall_rule(vm_name, dest_ip, dest_port, "allow")
-            enrichment.record_connection(vm_name, dest_ip, dest_port, hostname, None, "allow")
-            return "allow"
-
-    # No rule exists - need to prompt user
-    # Use lock to serialize notifications (one dialog at a time)
-    print(f"[firewall] {rule_key} -> no rule, waiting for lock...")
-    with _notification_lock:
-        # Re-check rules in case another thread added it while we waited
-        rules = config.read_firewall_rules(vm_name)
-        if rule_key in rules:
-            decision = rules[rule_key]
-            print(f"[firewall] {rule_key} -> {decision} (added while waiting)")
-            enrichment.record_connection(vm_name, dest_ip, dest_port, None, None, decision)
-            return decision
-
-        recent = enrichment.get_recent_connections(vm_name)
-
-        # Show notification and WAIT for response
-        print(f"[firewall] {rule_key} -> showing notification...")
-        decision = notifier.show_firewall_alert(
-            vm_name, dest_ip, dest_port,
-            domain=info.domain,
-            process_name=info.process_name,
-            recent_connections=recent,
-        )
-
-        # Store the decision for future connections
-        config.add_firewall_rule(vm_name, dest_ip, dest_port, decision)
-        print(f"[firewall] {rule_key} -> user chose: {decision}")
-
-        enrichment.record_connection(
-            vm_name, dest_ip, dest_port,
-            info.domain, info.process_name, decision,
-        )
-
-        return decision
-
-
-def _stop_proxy(vm_name: str) -> None:
-    """Stop the proxy server for a VM."""
-    # Signal the proxy thread to NOT restart after stopping
-    _proxy_intentional_stop.add(vm_name)
-
-    loop = _proxy_loops.get(vm_name)
-    server = _proxy_servers.get(vm_name)
-
-    if loop and server and loop.is_running():
-        # Close the server first to stop accepting new connections,
-        # preventing coroutine cleanup errors from new connections during shutdown
-        try:
-            future = asyncio.run_coroutine_threadsafe(server.stop(), loop)
-            future.result(timeout=2)
-        except Exception:
-            pass
-
-    if loop and loop.is_running():
-        loop.call_soon_threadsafe(loop.stop)
-
-    _proxy_loops.pop(vm_name, None)
-    _proxy_threads.pop(vm_name, None)
-    _proxy_servers.pop(vm_name, None)
-    _proxy_intentional_stop.discard(vm_name)
-
-
-def _run_proxy_thread(vm_name: str, proxy_port_file: Path, allow_all: bool = False) -> None:
-    """Run the SOCKS5 proxy in a background thread with auto-restart."""
-    import traceback
-
-    MAX_RESTARTS = 5
-    restart_delay = 1.0
-    bound_port: int | None = None
-
-    def check_rule(dest_ip: str, dest_port: int) -> str | None:
-        if allow_all:
-            print(f"[firewall] {dest_ip}:{dest_port} -> allowed (allow-all mode)")
-            return "allow"
-        return _check_firewall_rule(vm_name, dest_ip, dest_port)
-
-    for attempt in range(MAX_RESTARTS + 1):
-        if vm_name in _proxy_intentional_stop:
-            return
-
-        if attempt > 0:
-            print(f"[proxy] Restarting proxy (attempt {attempt + 1}/{MAX_RESTARTS + 1})...", flush=True)
-            time.sleep(restart_delay)
-            restart_delay = min(restart_delay * 2, 10.0)
-
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        # Custom exception handler to prevent the loop from dying on
-        # coroutine cleanup errors (Python 3.14 raises RuntimeError when
-        # a coroutine ignores GeneratorExit during GC)
-        def _loop_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
-            exc = context.get("exception")
-            if isinstance(exc, RuntimeError) and "GeneratorExit" in str(exc):
-                return  # Suppress coroutine cleanup errors
-            msg = context.get("message", "Unknown error")
-            print(f"[proxy] asyncio error: {msg}: {exc or ''}", flush=True)
-
-        loop.set_exception_handler(_loop_exception_handler)
-
-        server = None
-        try:
-            if bound_port is not None:
-                # Restart: reuse the same port so QEMU guestfwd still works
-                server = proxy.SOCKS5Server(vm_name, port=bound_port, check_rule=check_rule)
-                port = loop.run_until_complete(server.start())
-            else:
-                server, port = loop.run_until_complete(
-                    proxy.run_proxy_for_vm(vm_name, check_rule)
-                )
-                bound_port = port
-
-            # Store port in file so QEMU can read it
-            proxy_port_file.write_text(str(port))
-
-            # Store server and loop reference for cleanup
-            _proxy_servers[vm_name] = server
-            _proxy_loops[vm_name] = loop
-
-            loop.run_forever()
-
-            # loop.run_forever() returned — check if this was intentional
-            if vm_name in _proxy_intentional_stop:
-                return
-            # Unexpected stop (shouldn't normally happen)
-            print("[proxy] Event loop stopped unexpectedly", flush=True)
-
-        except Exception as e:
-            print(f"[proxy] Proxy crashed: {e}", flush=True)
-            traceback.print_exc()
-        finally:
-            # Clean up the current loop
-            if server is not None:
-                try:
-                    loop.run_until_complete(server.stop())
-                except Exception:
-                    pass
-            pending = asyncio.all_tasks(loop)
-            for task in pending:
-                task.cancel()
-            if pending:
-                try:
-                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                except Exception:
-                    pass
-            loop.close()
-
-    print(f"[proxy] FATAL: Proxy failed after {MAX_RESTARTS + 1} attempts, giving up.", flush=True)
 
 
 def create(
@@ -333,13 +111,7 @@ def start(
     # Clean up stale proxy port file from previous failed starts
     proxy_port_file.unlink(missing_ok=True)
 
-    proxy_thread = threading.Thread(
-        target=_run_proxy_thread,
-        args=(name, proxy_port_file, allow_all),
-        daemon=True,  # Daemon thread - will be killed when main exits
-    )
-    proxy_thread.start()
-    _proxy_threads[name] = proxy_thread
+    proxy.start_thread(name, proxy_port_file, allow_all, firewall.check_rule)
 
     # Wait for proxy to start and write port
     timeout = 5.0
@@ -414,12 +186,11 @@ def start(
                 break  # QEMU exited
             except subprocess.TimeoutExpired:
                 # Check if proxy thread is still alive
-                pt = _proxy_threads.get(name)
-                if pt and not pt.is_alive():
+                if not proxy.is_thread_alive(name):
                     print("[proxy] WARNING: Proxy thread died — VM has no internet", flush=True)
     finally:
         # Stop the proxy server cleanly
-        _stop_proxy(name)
+        proxy.stop(name)
         # Clean up enrichment caches
         enrichment.clear_vm_state(name)
         # Clean up files
@@ -448,7 +219,6 @@ def stop(name: str, force: bool = False) -> None:
             with QMPClient(qmp_path) as qmp:
                 qmp.system_powerdown()
             # Wait briefly for shutdown
-            import time
             for _ in range(30):
                 try:
                     os.kill(pid, 0)
@@ -468,7 +238,7 @@ def stop(name: str, force: bool = False) -> None:
             pass
 
     # Stop the proxy server gracefully
-    _stop_proxy(name)
+    proxy.stop(name)
 
     # Clean up proxy port file
     proxy_port_file = config.vm_dir(name) / "proxy_port"

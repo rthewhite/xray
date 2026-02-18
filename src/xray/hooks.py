@@ -213,14 +213,20 @@ def run_hook_scripts(
         print(f"[hooks] Running {hook_type}/{script_name} ({source})...", flush=True)
 
         try:
-            # Run script and stream output in real-time
             result = subprocess.run(
                 [str(script_path)],
                 env=script_env,
                 text=True,
+                capture_output=True,
                 timeout=timeout_per_script,
                 cwd=str(script_path.parent),
             )
+
+            # Print captured output with prefix
+            for stream in (result.stdout, result.stderr):
+                if stream:
+                    for line in stream.splitlines():
+                        print(f"[hooks]   {line}", flush=True)
 
             if result.returncode != 0:
                 results.append((source, script_name, False, f"Exit code {result.returncode}"))
