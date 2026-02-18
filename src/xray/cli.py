@@ -146,6 +146,9 @@ def vm_create(name: str, base_name: str | None, memory: int, cpus: int, ssh_user
         console.print(f"[red]Error:[/] {e}")
         sys.exit(1)
 
+    # Run create hooks (plugins can prompt for settings before VM starts)
+    plugins_mod.run_plugin_hooks("create", name)
+
     # Autostart: flag overrides global config
     should_start = start if start is not None else config.get_global("autostart", False)
     if should_start:
@@ -495,7 +498,7 @@ def hooks_group():
     2. User global scripts (~/.xray/scripts/{hook_type}/)
     3. Per-VM scripts (~/.xray/vms/{vm}/scripts/{hook_type}/)
 
-    Hook types: initial-boot, boot
+    Hook types: create, initial-boot, boot
     """
 
 
@@ -538,15 +541,15 @@ def hooks_list(vm: str):
 
 @hooks_group.command("run")
 @click.argument("vm", shell_complete=_complete_vm_names)
-@click.argument("hook_type", type=click.Choice(["initial-boot", "boot"]))
+@click.argument("hook_type", type=click.Choice(["create", "initial-boot", "boot"]))
 @click.option("--user", "-u", default=None, help="SSH username (default: from VM config)")
 def hooks_run(vm: str, hook_type: str, user: str | None):
-    """Manually run hooks for a VM (VM must be running)."""
+    """Manually run hooks for a VM (VM must be running for boot hooks)."""
     if not config.vm_dir(vm).exists():
         console.print(f"[red]VM '{vm}' not found[/]")
         sys.exit(1)
 
-    if not vm_mod.is_running(vm):
+    if hook_type != "create" and not vm_mod.is_running(vm):
         console.print(f"[red]VM '{vm}' is not running[/]")
         sys.exit(1)
 
@@ -561,8 +564,6 @@ def hooks_run(vm: str, hook_type: str, user: str | None):
     if user is None:
         vm_cfg = config.read_vm_config(vm)
         user = vm_cfg.get("ssh_user", "ubuntu")
-    vm_cfg = config.read_vm_config(vm)
-    ssh_port = vm_cfg.get("ssh_port")
 
     total = len(scripts) + len(plugin_hooks)
     console.print(f"Running {total} {hook_type} hook(s)...")
@@ -570,8 +571,8 @@ def hooks_run(vm: str, hook_type: str, user: str | None):
     results = []
     if scripts:
         results.extend(hooks_mod.run_hook_scripts(vm, hook_type, ssh_user=user))
-    if plugin_hooks and ssh_port:
-        results.extend(plugins_mod.run_plugin_hooks(hook_type, vm, ssh_port, ssh_user=user))
+    if plugin_hooks:
+        results.extend(plugins_mod.run_plugin_hooks(hook_type, vm))
 
     # Show results
     success_count = sum(1 for _, _, success, _ in results if success)

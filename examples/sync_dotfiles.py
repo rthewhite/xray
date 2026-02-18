@@ -40,7 +40,7 @@ def dotfiles(vm):
 
 # --- Boot hook ---------------------------------------------------------------
 
-def sync_dotfiles(vm_name, ssh_port, ssh_user, ssh_host):
+def sync_dotfiles(vm_name, ssh_port, ssh_user, ssh_host, helpers):
     """Rsync dotfiles into the VM on every boot."""
     home = Path.home()
 

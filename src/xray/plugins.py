@@ -10,15 +10,15 @@ and HOOKS variables for registration — no xray imports required:
     def deploy(vm):
         click.echo(f"Deploying to {vm}...")
 
-    def sync_dotfiles(vm_name, ssh_port, ssh_user, ssh_host, helpers):
-        # Read/write plugin settings in vm.toml (scoped to this plugin)
-        last_sync = helpers.get("last_sync")
-        helpers.set("last_sync", "2024-01-01")
-        helpers.delete("old_key")
-        all_settings = helpers.get_all()
+    def sync_dotfiles(vm_name, helpers):
+        # Run commands in the VM
+        helpers.run("mkdir -p ~/.config")
+        helpers.copy_file("~/.vimrc", "~/.vimrc")
+        helpers.run_script("apt-get update && apt-get install -y vim")
 
-        import subprocess
-        subprocess.run(["scp", "-P", str(ssh_port), ...])
+        # Read/write plugin settings in vm.toml (scoped to this plugin)
+        helpers.set("last_sync", "2024-01-01")
+        last_sync = helpers.get("last_sync")
 
     COMMANDS = [deploy]
     HOOKS = {
@@ -33,19 +33,27 @@ from pathlib import Path
 
 import click
 
-from . import config
+from . import config, ssh as ssh_mod
 
 
 class PluginHelpers:
-    """Scoped settings access for a plugin within a VM's vm.toml.
+    """Helper object passed to plugin hooks.
 
-    Settings are stored under [plugins.<plugin_name>] in the VM config.
-    A plugin can only read and modify its own settings.
+    Provides:
+    - Scoped settings in vm.toml under [plugins.<plugin_name>]
+    - SSH commands pre-bound to the VM's connection details
     """
 
     def __init__(self, vm_name: str, plugin_name: str):
         self._vm_name = vm_name
         self._plugin_name = plugin_name
+        # Read SSH details from VM config
+        vm_cfg = config.read_vm_config(vm_name)
+        self._ssh_port = vm_cfg.get("ssh_port")
+        self._ssh_user = vm_cfg.get("ssh_user", "ubuntu")
+        self._ssh_host = "127.0.0.1"
+
+    # ── Settings (scoped to [plugins.<plugin_name>] in vm.toml) ──
 
     def get(self, key: str, default=None):
         """Read a setting for this plugin."""
@@ -77,6 +85,48 @@ class PluginHelpers:
                 if not vm_cfg["plugins"]:
                     del vm_cfg["plugins"]
             config.write_vm_config(self._vm_name, vm_cfg)
+
+    # ── SSH helpers (pre-bound to this VM's connection) ──
+
+    def run(self, command: str, timeout: int = 30) -> tuple[int, str, str]:
+        """Run a command in the VM via SSH.
+
+        Returns (returncode, stdout, stderr).
+        Raises RuntimeError if the command fails (non-zero exit).
+        """
+        rc, stdout, stderr = ssh_mod.run_command(
+            self._ssh_host, self._ssh_port, command,
+            user=self._ssh_user, timeout=timeout,
+        )
+        if rc != 0:
+            raise RuntimeError(f"Command failed (exit {rc}): {stderr.strip() or stdout.strip()}")
+        return rc, stdout, stderr
+
+    def run_script(self, script_content: str, timeout: int = 300) -> tuple[int, str, str]:
+        """Run a multi-line bash script in the VM.
+
+        Returns (returncode, stdout, stderr).
+        Raises RuntimeError if the script fails.
+        """
+        rc, stdout, stderr = ssh_mod.run_script(
+            self._ssh_host, self._ssh_port, script_content,
+            user=self._ssh_user, timeout=timeout,
+        )
+        if rc != 0:
+            raise RuntimeError(f"Script failed (exit {rc}): {stderr.strip() or stdout.strip()}")
+        return rc, stdout, stderr
+
+    def copy_file(self, local_path: str, remote_path: str, timeout: int = 30) -> None:
+        """Copy a local file into the VM via SCP.
+
+        Raises RuntimeError if the copy fails.
+        """
+        rc, stdout, stderr = ssh_mod.copy_file(
+            self._ssh_host, self._ssh_port, local_path, remote_path,
+            user=self._ssh_user, timeout=timeout,
+        )
+        if rc != 0:
+            raise RuntimeError(f"Copy failed: {stderr.strip() or stdout.strip()}")
 
 
 # Module-level registry populated by load_all_plugins()
@@ -125,7 +175,7 @@ def _load_plugin(path: Path) -> tuple[list[click.BaseCommand], dict[str, list[ca
     # Validate hooks
     valid_hooks: dict[str, list[callable]] = {}
     for hook_type, hook_list in hooks.items():
-        if hook_type not in ("initial-boot", "boot"):
+        if hook_type not in ("create", "initial-boot", "boot"):
             print(f"[plugins] Warning: {stem}: unknown hook type '{hook_type}', skipping")
             continue
         valid_fns = []
@@ -174,9 +224,6 @@ def get_plugin_hooks(hook_type: str) -> list[tuple[str, callable]]:
 def run_plugin_hooks(
     hook_type: str,
     vm_name: str,
-    ssh_port: int,
-    ssh_user: str = "ubuntu",
-    ssh_host: str = "127.0.0.1",
 ) -> list[tuple[str, str, bool, str]]:
     """Execute plugin hooks with error isolation.
 
@@ -198,9 +245,6 @@ def run_plugin_hooks(
         try:
             fn(
                 vm_name=vm_name,
-                ssh_port=ssh_port,
-                ssh_user=ssh_user,
-                ssh_host=ssh_host,
                 helpers=helpers,
             )
             results.append((source, fn_name, True, ""))

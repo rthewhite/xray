@@ -26,26 +26,19 @@ _proxy_intentional_stop: set[str] = set()
 _notification_lock = threading.Lock()
 
 
-def _is_default_allowed(dest_ip: str) -> bool:
-    """Check if a destination IP matches default allowed domains."""
+def _matches_default_domain(hostname: str) -> str | None:
+    """Check if hostname matches any default allowed domain.
+
+    Returns the matched domain pattern, or None.
+    """
     default_domains = firewall.get_default_allowed_domains()
-
     if not default_domains:
-        return False
-
-    # Try reverse DNS lookup
-    hostname = notifier._get_hostname(dest_ip)
-    if not hostname:
-        return False
-
-    # Check if hostname matches any default allowed domain
+        return None
     hostname_lower = hostname.lower()
     for domain in default_domains:
         if hostname_lower == domain or hostname_lower.endswith("." + domain):
-            print(f"[firewall] {dest_ip} -> auto-allowed (matches default: {domain})")
-            return True
-
-    return False
+            return domain
+    return None
 
 
 def _check_firewall_rule(vm_name: str, dest_ip: str, dest_port: int) -> str | None:
@@ -68,12 +61,30 @@ def _check_firewall_rule(vm_name: str, dest_ip: str, dest_port: int) -> str | No
         enrichment.record_connection(vm_name, dest_ip, dest_port, None, None, decision)
         return decision
 
-    # Check if this matches a default allowed domain
-    if _is_default_allowed(dest_ip):
-        # Auto-allow and save the rule for future
-        config.add_firewall_rule(vm_name, dest_ip, dest_port, "allow")
-        enrichment.record_connection(vm_name, dest_ip, dest_port, None, None, "allow")
-        return "allow"
+    # Enrich the connection with domain/process info from the guest's
+    # dnsmasq log. This tells us which domain resolved to this IP, which
+    # reverse DNS cannot reliably do (CDN/cloud IPs return provider names).
+    print(f"[firewall] {rule_key} -> enriching...")
+    info = enrichment.enrich(vm_name, dest_ip, dest_port)
+
+    # Check if the enriched domain matches a default allowed domain
+    if info.domain:
+        match = _matches_default_domain(info.domain)
+        if match:
+            print(f"[firewall] {dest_ip} ({info.domain}) -> auto-allowed (matches default: {match})")
+            config.add_firewall_rule(vm_name, dest_ip, dest_port, "allow")
+            enrichment.record_connection(vm_name, dest_ip, dest_port, info.domain, None, "allow")
+            return "allow"
+
+    # Fallback: try reverse DNS (works for IPs with correct PTR records)
+    hostname = notifier._get_hostname(dest_ip)
+    if hostname:
+        match = _matches_default_domain(hostname)
+        if match:
+            print(f"[firewall] {dest_ip} ({hostname}) -> auto-allowed (matches default: {match})")
+            config.add_firewall_rule(vm_name, dest_ip, dest_port, "allow")
+            enrichment.record_connection(vm_name, dest_ip, dest_port, hostname, None, "allow")
+            return "allow"
 
     # No rule exists - need to prompt user
     # Use lock to serialize notifications (one dialog at a time)
@@ -87,12 +98,9 @@ def _check_firewall_rule(vm_name: str, dest_ip: str, dest_port: int) -> str | No
             enrichment.record_connection(vm_name, dest_ip, dest_port, None, None, decision)
             return decision
 
-        # Enrich the connection with domain/process info (best-effort, 5s timeout)
-        print(f"[firewall] {rule_key} -> enriching...")
-        info = enrichment.enrich(vm_name, dest_ip, dest_port)
         recent = enrichment.get_recent_connections(vm_name)
 
-        # Still no rule - show notification and WAIT for response
+        # Show notification and WAIT for response
         print(f"[firewall] {rule_key} -> showing notification...")
         decision = notifier.show_firewall_alert(
             vm_name, dest_ip, dest_port,

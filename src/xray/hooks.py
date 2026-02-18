@@ -22,7 +22,7 @@ from . import config, ssh
 
 
 # Hook type names (folder names)
-HOOK_TYPES = ("initial-boot", "boot")
+HOOK_TYPES = ("create", "initial-boot", "boot")
 
 
 def _xray_scripts_dir() -> Path:
@@ -247,9 +247,7 @@ def run_boot_hooks(name: str, ssh_user: str = "ubuntu") -> None:
 
     Runs initial-boot (if not done) then boot. Includes plugin hooks.
     """
-    from . import plugins, firewall
-
-    ssh_port = firewall.get_ssh_port(name)
+    from . import plugins
 
     # Check if initial boot hooks need to run
     if not is_first_boot_completed(name):
@@ -258,10 +256,8 @@ def run_boot_hooks(name: str, ssh_user: str = "ubuntu") -> None:
         if scripts or plugin_hooks:
             print(f"[hooks] Running initial-boot hooks for '{name}'...", flush=True)
             results = run_hook_scripts(name, "initial-boot", ssh_user=ssh_user)
-            if plugin_hooks and ssh_port:
-                results.extend(plugins.run_plugin_hooks(
-                    "initial-boot", name, ssh_port, ssh_user=ssh_user,
-                ))
+            if plugin_hooks:
+                results.extend(plugins.run_plugin_hooks("initial-boot", name))
             # Only mark as completed if all hooks succeeded
             all_success = all(success for _, _, success, _ in results)
             if all_success:
@@ -280,10 +276,8 @@ def run_boot_hooks(name: str, ssh_user: str = "ubuntu") -> None:
     if scripts or plugin_hooks:
         print(f"[hooks] Running boot hooks for '{name}'...", flush=True)
         results = run_hook_scripts(name, "boot", ssh_user=ssh_user)
-        if plugin_hooks and ssh_port:
-            results.extend(plugins.run_plugin_hooks(
-                "boot", name, ssh_port, ssh_user=ssh_user,
-            ))
+        if plugin_hooks:
+            results.extend(plugins.run_plugin_hooks("boot", name))
         failed = [(s, n) for s, n, success, _ in results if not success]
         if failed:
             print(f"[hooks] boot had failures for '{name}': {failed}", flush=True)
